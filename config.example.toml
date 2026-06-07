@@ -1,0 +1,62 @@
+[server]
+# HTTP host. Default: 127.0.0.1
+host = "127.0.0.1"
+# HTTP port. Default: 9555
+port = 9555
+# Max request body size in MB. Default: 100
+request_body_limit_mb = 100
+# Worker threads for request handling. Default: 16
+thread_count = 16
+
+[queue]
+# Maximum queued requests waiting for a worker. Default: 10
+max_pending_requests = 10
+# Max wait time in seconds before returning queue timeout. Default: 600
+default_timeout_sec = 600
+
+[logging]
+# Log level. Default: info
+level = "info"
+# Directory for log files. Default: logs
+directory = "logs"
+# Maximum log file size in MB before rotation. Default: 10
+max_file_size_mb = 10
+# Number of rotated log files to keep. Default: 10
+max_files = 10
+
+
+[[models]]
+# OpenAI-compatible model id.
+id = "BAAI/bge-m3"
+# Model type. Default: embedding
+type = "embedding"
+# Local model path relative to the project or absolute path. Forward slashes work on Windows.
+path = "models/strokinkv/bge-m3-int8-ov"
+# Enable this model. Default: true
+enabled = true
+# Preload model on startup. Default: false
+preload = false
+# Idle timeout in seconds. Must be 0 in this version.
+idle_timeout_sec = 0
+# Per-model queue timeout in seconds. Default: 600
+queue_timeout_sec = 600
+# Normalize embedding vectors. Default: true
+normalize = true
+
+[[models]]
+# OpenAI-compatible model id.
+id = "openai/whisper-large-v3-turbo"
+# Model type. Default: whisper
+type = "whisper"
+# Local model path relative to the project or absolute path. Forward slashes work on Windows.
+path = "models/OpenVINO/whisper-large-v3-turbo-int8-ov"
+# Enable this model. Default: true
+enabled = true
+# Preload model on startup. Default: false
+preload = false
+# Idle timeout in seconds. Must be 0 in this version.
+idle_timeout_sec = 0
+# Per-model queue timeout in seconds. Default: 600
+queue_timeout_sec = 600
+# Maximum accepted audio duration in seconds. Default: 1800
+max_audio_duration_sec = 1800

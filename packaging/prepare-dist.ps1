@@ -1,0 +1,107 @@
+param(
+    [string]$Configuration = "release",
+    [string]$RustToolchain = "stable-x86_64-pc-windows-msvc",
+    [string]$VsDevCmd = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat",
+    [string]$DistDir = "dist\ai2npu",
+    [string]$OpenVinoGenAiRoot = "tools\openvino_genai_2026.1.0.0_archive\openvino_genai_windows_2026.1.0.0_x86_64",
+    [string]$BridgeDll = "build\ai2npu_genai_bridge_archive\Release\ai2npu_genai_bridge.dll",
+    [switch]$SkipCargoBuild
+)
+
+$ErrorActionPreference = "Stop"
+
+$ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+Set-Location $ProjectRoot
+
+$archive = Resolve-Path $OpenVinoGenAiRoot
+$runtimeBin = Join-Path $archive "runtime\bin\intel64\Release"
+$runtimeLib = Join-Path $archive "runtime\lib\intel64\Release"
+$tbbBin = Join-Path $archive "runtime\3rdparty\tbb\bin"
+
+foreach ($path in @($runtimeBin, $runtimeLib, $tbbBin)) {
+    if (-not (Test-Path $path)) {
+        throw "OpenVINO SDK path not found: $path"
+    }
+}
+
+$env:OPENVINO_SDK_ROOT = $archive.Path
+$env:OPENVINO_LIB_DIR = $runtimeLib
+$env:PATH = "$runtimeBin;$tbbBin;$env:PATH"
+
+if (-not $SkipCargoBuild) {
+    if ($RustToolchain -like "*windows-msvc") {
+        if (-not (Test-Path $VsDevCmd)) {
+            throw "Visual Studio Developer Command Prompt not found at $VsDevCmd"
+        }
+        & cmd.exe /d /s /c "`"$VsDevCmd`" -arch=x64 -host_arch=x64 && rustup run $RustToolchain cargo build --release"
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo build --release failed with exit code $LASTEXITCODE"
+        }
+    } else {
+        $env:Path = "C:\msys64\ucrt64\bin;$env:USERPROFILE\.cargo\bin;$env:Path"
+        rustup run $RustToolchain cargo build --release
+    }
+}
+
+$dist = Join-Path $ProjectRoot $DistDir
+if (Test-Path $dist) {
+    Remove-Item -LiteralPath $dist -Recurse -Force
+}
+New-Item -ItemType Directory -Force $dist | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $dist "models") | Out-Null
+
+$exe = Join-Path $ProjectRoot "target\$Configuration\ai2npu.exe"
+if (-not (Test-Path $exe)) {
+    throw "ai2npu.exe not found at $exe"
+}
+Copy-Item $exe (Join-Path $dist "ai2npu.exe")
+Copy-Item (Join-Path $ProjectRoot "config.example.toml") (Join-Path $dist "config.example.toml")
+
+$bridge = Resolve-Path $BridgeDll
+Copy-Item $bridge (Join-Path $dist "ai2npu_genai_bridge.dll")
+
+$runtimeDlls = @(
+    "openvino.dll",
+    "openvino_c.dll",
+    "openvino_genai.dll",
+    "openvino_genai_c.dll",
+    # WhisperPipeline targets NPU, but OpenVINO GenAI still needs CPU runtime
+    # support for internal pipeline steps such as preprocessing/token handling.
+    "openvino_intel_cpu_plugin.dll",
+    "openvino_tokenizers.dll",
+    "openvino_intel_npu_plugin.dll",
+    "openvino_intel_npu_compiler.dll",
+    "openvino_ir_frontend.dll",
+    "openvino_onnx_frontend.dll",
+    "openvino_paddle_frontend.dll",
+    "openvino_pytorch_frontend.dll",
+    "openvino_tensorflow_frontend.dll",
+    "openvino_tensorflow_lite_frontend.dll"
+)
+
+foreach ($dll in $runtimeDlls) {
+    $source = Join-Path $runtimeBin $dll
+    if (-not (Test-Path $source)) {
+        throw "runtime DLL not found: $source"
+    }
+    Copy-Item $source (Join-Path $dist $dll)
+}
+
+Get-ChildItem $tbbBin -Filter "*.dll" |
+    Where-Object { $_.Name -notlike "*_debug.dll" } |
+    Copy-Item -Destination $dist
+
+if ($RustToolchain -like "*windows-gnu") {
+    $msysDlls = @(
+        "C:\msys64\ucrt64\bin\libstdc++-6.dll",
+        "C:\msys64\ucrt64\bin\libgcc_s_seh-1.dll",
+        "C:\msys64\ucrt64\bin\libwinpthread-1.dll"
+    )
+    foreach ($dll in $msysDlls) {
+        if (Test-Path $dll) {
+            Copy-Item $dll $dist
+        }
+    }
+}
+
+Write-Host "Prepared distribution: $dist"

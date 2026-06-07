@@ -1,0 +1,17 @@
+/target/
+/build/
+/dist/
+/models/
+/docs/superpowers/
+/.venv/
+/logs/
+/tools/
+/whisper_cache/
+/config.toml
+.idea/
+.vscode/
+.DS_Store
+*.log
+*.pdb
+*.ilk
+*.obj
