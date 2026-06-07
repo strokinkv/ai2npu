@@ -68,6 +68,7 @@ pub fn build_router_with_executors(
         .route("/v1/embeddings", post(create_embeddings))
         .route("/v1/audio/transcriptions", post(create_transcription))
         .route("/v1/audio/translations", post(create_translation))
+        .route("/admin/models/unload", post(unload_models))
         .route("/health", get(health))
         .route("/logs", get(logs))
         .fallback(not_found)
@@ -373,6 +374,30 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
+async fn unload_models(State(state): State<AppState>) -> Result<Json<UnloadResponse>, ApiError> {
+    let embedding_executor = Arc::clone(&state.embedding_executor);
+    let audio_executor = Arc::clone(&state.audio_executor);
+    let current_request = Arc::clone(&state.current_request);
+    let job = InferenceJob::new(move || {
+        let _guard = CurrentRequestGuard::new(&current_request, "admin unload models".to_string());
+        let embedding_count = embedding_executor.unload_all()?;
+        let audio_count = audio_executor.unload_all()?;
+        Ok(InferenceOutput::ModelsUnloaded(
+            embedding_count + audio_count,
+        ))
+    });
+
+    let output = state.queue.submit(job).await.map_err(queue_error_to_api)?;
+    let InferenceOutput::ModelsUnloaded(unloaded_model_count) = output else {
+        return Err(ApiError::internal("unexpected non-unload inference output"));
+    };
+
+    Ok(Json(UnloadResponse {
+        object: "model_unload",
+        unloaded_model_count,
+    }))
+}
+
 async fn create_embeddings(
     State(state): State<AppState>,
     JsonExtractor(request): JsonExtractor<EmbeddingRequest>,
@@ -460,6 +485,12 @@ struct HealthResponse {
     queue_size: usize,
     current_request: Option<String>,
     uptime_sec: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct UnloadResponse {
+    object: &'static str,
+    unloaded_model_count: usize,
 }
 
 struct CurrentRequestGuard<'a> {

@@ -92,6 +92,16 @@ impl EmbeddingExecutor for BgeEmbeddingExecutor {
             .map(|path| path.display().to_string())
             .collect()
     }
+
+    fn unload_all(&self) -> Result<usize> {
+        let mut compiled_models = self
+            .compiled_models
+            .lock()
+            .expect("compiled model cache poisoned");
+        let unloaded = compiled_models.len();
+        compiled_models.clear();
+        Ok(unloaded)
+    }
 }
 
 fn normalize_l2(values: &mut [f32]) {

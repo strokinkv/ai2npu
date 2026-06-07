@@ -77,6 +77,10 @@ fn main() -> Result<()> {
                 );
             }
         }
+        Command::Unload { url } => {
+            let response = ai2npu::admin_client::unload_models(&url)?;
+            println!("models unloaded: {}", response.unloaded_model_count);
+        }
         Command::Version => {
             println!("ai2npu {}", env!("CARGO_PKG_VERSION"));
         }

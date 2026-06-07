@@ -36,6 +36,12 @@ curl.exe http://127.0.0.1:9555/health
 curl.exe http://127.0.0.1:9555/v1/models
 ```
 
+Для освобождения ресурсов без остановки службы:
+
+```powershell
+& "C:\Program Files\ai2npu\ai2npu.exe" unload
+```
+
 Проверка embeddings из PowerShell:
 
 ```powershell

@@ -8,13 +8,15 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tower::ServiceExt;
 
 #[derive(Debug, Clone)]
 struct StaticAudioExecutor {
     output: AudioOutput,
     loaded_models: Vec<String>,
+    unload_count: Arc<Mutex<usize>>,
 }
 
 impl StaticAudioExecutor {
@@ -22,6 +24,7 @@ impl StaticAudioExecutor {
         Self {
             output,
             loaded_models: Vec::new(),
+            unload_count: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -29,6 +32,7 @@ impl StaticAudioExecutor {
         Self {
             output,
             loaded_models,
+            unload_count: Arc::new(Mutex::new(0)),
         }
     }
 }
@@ -46,12 +50,20 @@ impl AudioExecutor for StaticAudioExecutor {
     fn loaded_models(&self) -> Vec<String> {
         self.loaded_models.clone()
     }
+
+    fn unload_all(&self) -> Result<usize> {
+        let mut count = self.unload_count.lock().unwrap();
+        *count += 1;
+        Ok(self.loaded_models.len())
+    }
 }
 
 #[derive(Debug, Clone)]
 struct StaticEmbeddingExecutor {
     embeddings: Vec<Vec<f32>>,
     loaded_models: Vec<String>,
+    block_embed_rx: Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>,
+    unload_count: Arc<Mutex<usize>>,
 }
 
 impl StaticEmbeddingExecutor {
@@ -59,6 +71,8 @@ impl StaticEmbeddingExecutor {
         Self {
             embeddings,
             loaded_models: Vec::new(),
+            block_embed_rx: Arc::new(Mutex::new(None)),
+            unload_count: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -66,12 +80,29 @@ impl StaticEmbeddingExecutor {
         Self {
             embeddings,
             loaded_models,
+            block_embed_rx: Arc::new(Mutex::new(None)),
+            unload_count: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    fn with_blocking_embed(
+        embeddings: Vec<Vec<f32>>,
+        release_rx: std::sync::mpsc::Receiver<()>,
+    ) -> Self {
+        Self {
+            embeddings,
+            loaded_models: vec!["BAAI/bge-m3".to_string()],
+            block_embed_rx: Arc::new(Mutex::new(Some(release_rx))),
+            unload_count: Arc::new(Mutex::new(0)),
         }
     }
 }
 
 impl EmbeddingExecutor for StaticEmbeddingExecutor {
     fn embed(&self, _model: &ModelConfig, input: &[String]) -> Result<Vec<Vec<f32>>> {
+        if let Some(rx) = self.block_embed_rx.lock().unwrap().take() {
+            rx.recv().unwrap();
+        }
         if self.embeddings.len() == input.len() {
             return Ok(self.embeddings.clone());
         }
@@ -83,6 +114,12 @@ impl EmbeddingExecutor for StaticEmbeddingExecutor {
 
     fn loaded_models(&self) -> Vec<String> {
         self.loaded_models.clone()
+    }
+
+    fn unload_all(&self) -> Result<usize> {
+        let mut count = self.unload_count.lock().unwrap();
+        *count += 1;
+        Ok(self.loaded_models.len())
     }
 }
 
@@ -339,6 +376,86 @@ async fn health_reports_loaded_models_from_executors() {
         json["loaded_models"],
         serde_json::json!(["BAAI/bge-m3", "openai/whisper-large-v3-turbo"])
     );
+}
+
+#[tokio::test]
+async fn admin_unload_waits_for_active_request_and_unloads_all_models() {
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let embedding_executor = Arc::new(StaticEmbeddingExecutor::with_blocking_embed(
+        vec![vec![0.1, 0.2, 0.3]],
+        release_rx,
+    ));
+    let audio_executor = Arc::new(StaticAudioExecutor::with_loaded_models(
+        AudioOutput {
+            text: String::new(),
+            language: None,
+            duration: 0.0,
+            segments: Vec::new(),
+        },
+        vec!["openai/whisper-large-v3-turbo".to_string()],
+    ));
+    let app = build_router_with_executors(
+        example_config(),
+        status_with_npu(),
+        embedding_executor.clone(),
+        audio_executor.clone(),
+    );
+
+    let active_app = app.clone();
+    let active = tokio::spawn(async move {
+        active_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/embeddings")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "model": "BAAI/bge-m3",
+                            "input": "hello"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let unload_app = app.clone();
+    let unload = tokio::spawn(async move {
+        unload_app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/admin/models/unload")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!unload.is_finished());
+
+    release_tx.send(()).unwrap();
+    let active_response = active.await.unwrap();
+    assert_eq!(active_response.status(), StatusCode::OK);
+    let unload_response = unload.await.unwrap();
+    assert_eq!(unload_response.status(), StatusCode::OK);
+    let bytes = unload_response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(json["object"], "model_unload");
+    assert_eq!(json["unloaded_model_count"], 2);
+    assert_eq!(*embedding_executor.unload_count.lock().unwrap(), 1);
+    assert_eq!(*audio_executor.unload_count.lock().unwrap(), 1);
 }
 
 #[tokio::test]

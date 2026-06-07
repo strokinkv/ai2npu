@@ -95,11 +95,14 @@ ai2npu.exe restart-service
 ai2npu.exe validate-config
 ai2npu.exe check-npu
 ai2npu.exe list-models
+ai2npu.exe unload
 ai2npu.exe start-service
 ai2npu.exe stop-service
 ai2npu.exe restart-service
 ai2npu.exe uninstall-service
 ```
+
+`ai2npu.exe unload` отправляет локальный запрос в работающую службу и выгружает все загруженные модели из памяти. Если сейчас выполняется inference-запрос, команда ждёт его завершения и только потом освобождает ресурсы. Следующий inference-запрос загрузит нужную модель заново.
 
 Для разработки:
 
@@ -123,6 +126,9 @@ http://127.0.0.1:9555
 - `POST /v1/embeddings`
 - `POST /v1/audio/transcriptions`
 - `POST /v1/audio/translations`
+- `POST /admin/models/unload`
+
+`POST /admin/models/unload` используется командой `ai2npu.exe unload`. Это локальная административная операция для освобождения ресурсов модели без остановки службы.
 
 Пример запроса эмбеддингов:
 
@@ -154,6 +160,8 @@ curl.exe http://127.0.0.1:9555/v1/audio/transcriptions `
 ## Как это работает
 
 При старте сервис читает `config.toml`, инициализирует файловое логирование, определяет устройства OpenVINO и запускает локальный HTTP-сервер. Модели загружаются лениво по первому запросу. Инференс проходит через общую FIFO-очередь, поэтому одновременно выполняется только один запрос к модели.
+
+Команда `ai2npu.exe unload` ставит операцию выгрузки в эту же очередь. Поэтому она не прерывает активный запрос, а выполняется после него и очищает все загруженные executor/session caches.
 
 Эмбеддинги используют OpenVINO Runtime и BGE OpenVINO tokenizer/model bundle на `NPU`. Whisper работает через нативный C++ bridge поверх OpenVINO GenAI `WhisperPipeline`, тоже с таргетом `NPU`. CPU/GPU fallback для инференса моделей не используется.
 

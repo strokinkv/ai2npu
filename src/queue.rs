@@ -12,6 +12,7 @@ use crate::audio::AudioOutput;
 pub enum InferenceOutput {
     Embeddings(Vec<Vec<f32>>),
     Audio(AudioOutput),
+    ModelsUnloaded(usize),
 }
 
 type JobFn = Box<dyn FnOnce() -> Result<InferenceOutput> + Send + 'static>;

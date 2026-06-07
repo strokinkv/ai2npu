@@ -95,11 +95,14 @@ ai2npu.exe restart-service
 ai2npu.exe validate-config
 ai2npu.exe check-npu
 ai2npu.exe list-models
+ai2npu.exe unload
 ai2npu.exe start-service
 ai2npu.exe stop-service
 ai2npu.exe restart-service
 ai2npu.exe uninstall-service
 ```
+
+`ai2npu.exe unload` sends a local request to the running service and unloads all loaded models from memory. If an inference request is active, the command waits for it to finish before releasing resources. The next inference request loads the required model again.
 
 For development:
 
@@ -123,6 +126,9 @@ Endpoints:
 - `POST /v1/embeddings`
 - `POST /v1/audio/transcriptions`
 - `POST /v1/audio/translations`
+- `POST /admin/models/unload`
+
+`POST /admin/models/unload` is used by `ai2npu.exe unload`. It is a local administrative operation for releasing model resources without stopping the service.
 
 Embedding example:
 
@@ -154,6 +160,8 @@ Supported audio `response_format` values:
 ## How It Works
 
 At startup the service reads `config.toml`, initializes file logging, detects OpenVINO devices, and starts the local HTTP server. Models are loaded lazily on first request. Inference is serialized through a shared FIFO queue so only one model request runs at a time.
+
+The `ai2npu.exe unload` command enqueues the unload operation in the same queue. It does not interrupt an active request; it runs after that request and clears all loaded executor/session caches.
 
 Embeddings use OpenVINO Runtime and the BGE OpenVINO tokenizer/model bundle on `NPU`. Whisper uses a native C++ bridge around OpenVINO GenAI `WhisperPipeline`, also targeting `NPU`. CPU/GPU fallback for model inference is not used.
 

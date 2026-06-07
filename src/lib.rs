@@ -1,3 +1,4 @@
+pub mod admin_client;
 pub mod audio;
 pub mod bge_embeddings;
 pub mod bge_tokenizer;

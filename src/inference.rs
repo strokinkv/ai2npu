@@ -18,6 +18,9 @@ pub trait EmbeddingExecutor: Send + Sync {
     fn loaded_models(&self) -> Vec<String> {
         Vec::new()
     }
+    fn unload_all(&self) -> Result<usize> {
+        Ok(0)
+    }
 }
 
 pub trait AudioExecutor: Send + Sync {
@@ -43,6 +46,9 @@ pub trait AudioExecutor: Send + Sync {
     }
     fn loaded_models(&self) -> Vec<String> {
         Vec::new()
+    }
+    fn unload_all(&self) -> Result<usize> {
+        Ok(0)
     }
 }
 
@@ -188,6 +194,20 @@ impl AudioExecutor for NativeWhisperExecutor {
             .lock()
             .expect("loaded model mutex poisoned")
             .clone()
+    }
+
+    fn unload_all(&self) -> Result<usize> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("native whisper session mutex poisoned");
+        let unloaded = sessions.len();
+        sessions.clear();
+        self.loaded_models
+            .lock()
+            .expect("loaded model mutex poisoned")
+            .clear();
+        Ok(unloaded)
     }
 }
 

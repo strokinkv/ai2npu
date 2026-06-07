@@ -53,5 +53,9 @@ pub enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    Unload {
+        #[arg(long, default_value = "http://127.0.0.1:9555")]
+        url: String,
+    },
     Version,
 }

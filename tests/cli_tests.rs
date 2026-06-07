@@ -35,6 +35,14 @@ fn parses_windows_service_commands() {
 }
 
 #[test]
+fn parses_unload_command() {
+    assert!(matches!(
+        Cli::parse_from(["ai2npu", "unload"]).command,
+        Command::Unload { .. }
+    ));
+}
+
+#[test]
 fn install_service_accepts_config_and_exe_path() {
     let cli = Cli::parse_from([
         "ai2npu",
