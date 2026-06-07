@@ -84,6 +84,17 @@ Build the installer with Inno Setup:
 
 The output is written to `dist\ai2npu-setup-<version>.exe`.
 
+## GitHub Release
+
+The automated release runs when pushing a `vMAJOR.MINOR.PATCH` tag, for example:
+
+```powershell
+git tag -a v0.1.16 -m "ai2npu 0.1.16"
+git push origin v0.1.16
+```
+
+Before creating the tag, update the version in `Cargo.toml` and `packaging/ai2npu.iss`. The workflow verifies that the version matches the tag, builds the release binary, native bridge, installer, computes SHA256, and publishes a GitHub Release with `ai2npu-setup-<version>.exe`.
+
 ## Models and Synchronization
 
 BGE is pulled from the Hugging Face repository `strokinkv/bge-m3-int8-ov` over HTTPS and installed into:

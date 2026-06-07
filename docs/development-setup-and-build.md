@@ -84,6 +84,17 @@ Installer собирается через Inno Setup:
 
 Результат появляется в `dist\ai2npu-setup-<version>.exe`.
 
+## GitHub Release
+
+Автоматический release запускается при push тега вида `vMAJOR.MINOR.PATCH`, например:
+
+```powershell
+git tag -a v0.1.16 -m "ai2npu 0.1.16"
+git push origin v0.1.16
+```
+
+Перед созданием тега обновите версию в `Cargo.toml` и `packaging/ai2npu.iss`. Workflow проверяет совпадение версии с тегом, собирает release binary, native bridge, installer, считает SHA256 и публикует GitHub Release с `ai2npu-setup-<version>.exe`.
+
 ## Модели и синхронизация
 
 BGE берётся из Hugging Face репозитория `strokinkv/bge-m3-int8-ov` по HTTPS и устанавливается в:

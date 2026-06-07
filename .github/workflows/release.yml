@@ -1,0 +1,204 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.15"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  OPENVINO_GENAI_VERSION: 2026.1.0.0
+  OPENVINO_GENAI_ARCHIVE_URL: https://storage.openvinotoolkit.org/repositories/openvino_genai/packages/2026.1/windows/openvino_genai_windows_2026.1.0.0_x86_64.zip
+  OPENVINO_GENAI_ARCHIVE_DIR: tools\openvino_genai_2026.1.0.0_archive
+  OPENVINO_GENAI_ROOT: tools\openvino_genai_2026.1.0.0_archive\openvino_genai_windows_2026.1.0.0_x86_64
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Resolve release version
+        id: version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Release tag must match vMAJOR.MINOR.PATCH, got: $tag"
+          }
+          $version = $tag.Substring(1)
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Verify version metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ steps.version.outputs.version }}"
+          $cargo = Get-Content Cargo.toml -Raw
+          $inno = Get-Content packaging\ai2npu.iss -Raw
+          if ($cargo -notmatch "version\s*=\s*`"$([regex]::Escape($version))`"") {
+            throw "Cargo.toml version does not match release tag $version"
+          }
+          if ($inno -notmatch "#define\s+MyAppVersion\s+`"$([regex]::Escape($version))`"") {
+            throw "packaging\ai2npu.iss MyAppVersion does not match release tag $version"
+          }
+
+      - name: Restore OpenVINO GenAI archive cache
+        id: openvino-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.OPENVINO_GENAI_ARCHIVE_DIR }}
+          key: ${{ runner.os }}-openvino-genai-${{ env.OPENVINO_GENAI_VERSION }}-x86_64
+
+      - name: Download OpenVINO GenAI archive
+        if: steps.openvino-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          New-Item -ItemType Directory -Force tools | Out-Null
+          $archive = "tools\openvino_genai_${env:OPENVINO_GENAI_VERSION}.zip"
+          Invoke-WebRequest -Uri $env:OPENVINO_GENAI_ARCHIVE_URL -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $env:OPENVINO_GENAI_ARCHIVE_DIR -Force
+          Remove-Item -LiteralPath $archive -Force
+
+      - name: Configure OpenVINO environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = (Resolve-Path $env:OPENVINO_GENAI_ROOT).Path
+          $runtimeBin = Join-Path $root "runtime\bin\intel64\Release"
+          $runtimeLib = Join-Path $root "runtime\lib\intel64\Release"
+          $tbbBin = Join-Path $root "runtime\3rdparty\tbb\bin"
+          foreach ($path in @($runtimeBin, $runtimeLib, $tbbBin)) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "OpenVINO SDK path not found: $path"
+            }
+          }
+          "OPENVINO_SDK_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "OPENVINO_LIB_DIR=$runtimeLib" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $runtimeBin | Out-File -FilePath $env:GITHUB_PATH -Append
+          $tbbBin | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Test
+        run: cargo test
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Build native bridge
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cmake -S native\ai2npu_genai_bridge -B build\ai2npu_genai_bridge_archive -G "Visual Studio 17 2022" -A x64 `
+            -DOpenVINOGenAI_DIR="$env:OPENVINO_SDK_ROOT\runtime\cmake"
+          cmake --build build\ai2npu_genai_bridge_archive --config Release --parallel 2
+
+      - name: Prepare distribution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\packaging\prepare-dist.ps1 -SkipCargoBuild
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $existing = @(
+            (Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1),
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+          if ($existing) {
+            Write-Host "Using existing Inno Setup compiler: $existing"
+            exit 0
+          }
+
+          winget install --id JRSoftware.InnoSetup -e --accept-package-agreements --accept-source-agreements --silent
+          $installed = @(
+            (Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1),
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+          if (-not $installed -and (Get-Command choco.exe -ErrorAction SilentlyContinue)) {
+            choco install innosetup --yes --no-progress
+          }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $iscc = @(
+            (Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1),
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+          if (-not $iscc) {
+            throw "ISCC.exe was not found after Inno Setup installation"
+          }
+          & $iscc packaging\ai2npu.iss
+
+      - name: Verify installer artifact
+        id: artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ steps.version.outputs.version }}"
+          $installer = "dist\ai2npu-setup-$version.exe"
+          if (-not (Test-Path -LiteralPath $installer)) {
+            throw "Installer was not produced: $installer"
+          }
+          $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToUpperInvariant()
+          "installer=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "sha256=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          @"
+          ai2npu $version
+
+          Локальная Windows-служба с OpenAI-compatible API для Whisper transcription и BGE-M3 embeddings через OpenVINO на Intel NPU.
+
+          Основное:
+          - Windows service installer на Inno Setup.
+          - OpenAI-compatible endpoints: /v1/audio/transcriptions, /v1/audio/translations, /v1/embeddings, /v1/models.
+          - Whisper: OpenVINO whisper-large-v3-turbo-int8-ov.
+          - Embeddings: strokinkv/bge-m3-int8-ov.
+          - Модели скачиваются установщиком через ai2npu install-model.
+          - Пустое и слишком короткое audio возвращает пустой text без вызова Whisper.
+
+          Installer:
+          - ai2npu-setup-$version.exe
+          - SHA256: $hash
+          "@ | Set-Content -Path release-notes.md -Encoding UTF8
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ai2npu ${{ steps.version.outputs.version }}
+          body_path: release-notes.md
+          files: ${{ steps.artifact.outputs.installer }}
