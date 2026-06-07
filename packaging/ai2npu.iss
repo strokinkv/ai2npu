@@ -1,5 +1,5 @@
 #define MyAppName "ai2npu"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "ai2npu"
 #define DistDir "..\dist\ai2npu"
 

@@ -89,8 +89,8 @@ Installer собирается через Inno Setup:
 Автоматический release запускается при push тега вида `vMAJOR.MINOR.PATCH`, например:
 
 ```powershell
-git tag -a v1.0.0 -m "ai2npu 1.0.0"
-git push origin v1.0.0
+git tag -a v1.0.1 -m "ai2npu v1.0.1"
+git push origin v1.0.1
 ```
 
 Перед созданием тега обновите версию в `Cargo.toml` и `packaging/ai2npu.iss`. Workflow проверяет совпадение версии с тегом, собирает release binary, native bridge, installer, считает SHA256 и публикует GitHub Release с `ai2npu-setup-<version>.exe`.

@@ -89,8 +89,8 @@ The output is written to `dist\ai2npu-setup-<version>.exe`.
 The automated release runs when pushing a `vMAJOR.MINOR.PATCH` tag, for example:
 
 ```powershell
-git tag -a v1.0.0 -m "ai2npu 1.0.0"
-git push origin v1.0.0
+git tag -a v1.0.1 -m "ai2npu v1.0.1"
+git push origin v1.0.1
 ```
 
 Before creating the tag, update the version in `Cargo.toml` and `packaging/ai2npu.iss`. The workflow verifies that the version matches the tag, builds the release binary, native bridge, installer, computes SHA256, and publishes a GitHub Release with `ai2npu-setup-<version>.exe`.

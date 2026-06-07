@@ -47,11 +47,13 @@ Before a release, update versions in `Cargo.toml`, `Cargo.lock`, and `packaging/
 Push `main`, then create and push an annotated tag:
 
 ```powershell
-git tag -a v1.0.0 -m "ai2npu 1.0.0"
-git push origin v1.0.0
+git tag -a v1.0.1 -m "ai2npu v1.0.1"
+git push origin v1.0.1
 ```
 
 GitHub Actions verifies version metadata, restores/downloads the official OpenVINO GenAI archive, runs format/tests/clippy, builds the Rust binary, native bridge, distribution, installer, SHA256, and GitHub Release. Verify the release asset and checksum with `gh release view vMAJOR.MINOR.PATCH --json assets,url`.
+
+After the release workflow succeeds, download the produced installer from GitHub Releases, install it on the Windows test machine, and run the runtime checks below against the installed service. Do not consider a release validated only because GitHub Actions passed.
 
 ## Runtime Checks
 
