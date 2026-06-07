@@ -24,6 +24,37 @@ C:\ProgramData\ai2npu\models\OpenVINO\whisper-large-v3-turbo-int8-ov
 
 Сами файлы моделей не входят в GitHub-репозиторий и не коммитятся. Локальная папка `models/` используется только для разработки и тестов.
 
+## Установка и проверка
+
+Готовый installer публикуется в GitHub Releases как `ai2npu-setup-<version>.exe`. Для версии `1.0.0` ожидаемый файл: `ai2npu-setup-1.0.0.exe`.
+
+После установки проверьте службу:
+
+```powershell
+& "C:\Program Files\ai2npu\ai2npu.exe" version
+curl.exe http://127.0.0.1:9555/health
+curl.exe http://127.0.0.1:9555/v1/models
+```
+
+Проверка embeddings из PowerShell:
+
+```powershell
+$response = Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:9555/v1/embeddings" `
+  -ContentType "application/json" `
+  -Body (@{ model="BAAI/bge-m3"; input="test text" } | ConvertTo-Json -Compress)
+$response.data[0].embedding.Count
+```
+
+Ожидаемый размер embedding для BGE-M3: `1024`.
+
+## Ограничения
+
+- Нужны Windows 11, Intel NPU driver и доступный OpenVINO NPU device.
+- При первой установке нужен интернет: модели загружаются из Hugging Face по HTTPS.
+- Первый Whisper-запрос может быть медленнее из-за cold start.
+- GitHub Actions проверяет сборку и installer, но не выполняет live NPU tests на hosted runner.
+
 ## Документация
 
 Русская версия:
