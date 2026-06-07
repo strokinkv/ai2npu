@@ -117,7 +117,8 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           cmake -S native\ai2npu_genai_bridge -B build\ai2npu_genai_bridge_archive -G "Visual Studio 17 2022" -A x64 `
-            -DOpenVINOGenAI_DIR="$env:OPENVINO_SDK_ROOT\runtime\cmake"
+            -DOpenVINOGenAI_DIR="$env:OPENVINO_SDK_ROOT\runtime\cmake" `
+            -DOpenVINO_DIR="$env:OPENVINO_SDK_ROOT\runtime\cmake"
           cmake --build build\ai2npu_genai_bridge_archive --config Release --parallel 2
 
       - name: Prepare distribution
