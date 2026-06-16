@@ -56,11 +56,15 @@ jobs:
           $version = "${{ steps.version.outputs.version }}"
           $cargo = Get-Content Cargo.toml -Raw
           $inno = Get-Content packaging\ai2npu.iss -Raw
+          $lock = Get-Content Cargo.lock -Raw
           if ($cargo -notmatch "version\s*=\s*`"$([regex]::Escape($version))`"") {
             throw "Cargo.toml version does not match release tag $version"
           }
           if ($inno -notmatch "#define\s+MyAppVersion\s+`"$([regex]::Escape($version))`"") {
             throw "packaging\ai2npu.iss MyAppVersion does not match release tag $version"
+          }
+          if ($lock -notmatch "name = `"ai2npu`"\s*\r?\nversion = `"$([regex]::Escape($version))`"") {
+            throw "Cargo.lock version for ai2npu does not match release tag $version"
           }
 
       - name: Restore OpenVINO GenAI archive cache
@@ -107,7 +111,7 @@ jobs:
         run: cargo test
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Build release binary
         run: cargo build --release
@@ -185,11 +189,15 @@ jobs:
 
           Основное:
           - Windows service installer на Inno Setup.
-          - OpenAI-compatible endpoints: /v1/audio/transcriptions, /v1/audio/translations, /v1/embeddings, /v1/models.
+          - OpenAI-compatible endpoints: /v1/audio/transcriptions, /v1/audio/translations, /v1/embeddings, /v1/models, /health, /logs.
+          - Форматы ответа audio: json, verbose_json, text, srt, vtt.
+          - Поддержка параметра temperature (0.0–1.0) для Whisper.
           - Whisper: OpenVINO whisper-large-v3-turbo-int8-ov.
           - Embeddings: strokinkv/bge-m3-int8-ov.
           - Модели скачиваются установщиком через ai2npu install-model.
           - Пустое и слишком короткое audio возвращает пустой text без вызова Whisper.
+          - Выгрузка моделей без остановки службы: ai2npu unload (POST /admin/models/unload).
+          - server.thread_count задаёт число worker-потоков runtime.
 
           Installer:
           - ai2npu-setup-$version.exe

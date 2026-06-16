@@ -18,6 +18,7 @@ type WhisperTranscribe = unsafe extern "C" fn(
     *const c_char,
     *const c_char,
     *const c_char,
+    c_float,
     bool,
     *mut *mut c_char,
     *mut *mut c_char,
@@ -117,6 +118,9 @@ impl GenAiWhisperSession {
         })?;
         let language = optional_cstring(options.language.as_deref())?;
         let prompt = optional_cstring(options.prompt.as_deref())?;
+        // Negative temperature signals "unset" to the native bridge, which then
+        // keeps the model's default generation temperature.
+        let temperature = options.temperature.unwrap_or(-1.0);
         let mut json_out = ptr::null_mut();
         let mut error = ptr::null_mut();
 
@@ -130,6 +134,7 @@ impl GenAiWhisperSession {
                     .as_ref()
                     .map_or(ptr::null(), |value| value.as_ptr()),
                 prompt.as_ref().map_or(ptr::null(), |value| value.as_ptr()),
+                temperature,
                 options.return_timestamps,
                 &mut json_out,
                 &mut error,
@@ -211,6 +216,7 @@ mod tests {
         _task: *const c_char,
         _language: *const c_char,
         _prompt: *const c_char,
+        _temperature: c_float,
         _return_timestamps: bool,
         _json_out: *mut *mut c_char,
         _error: *mut *mut c_char,
@@ -242,7 +248,7 @@ mod tests {
 
         drop(GenAiWhisperSession {
             bridge: bridge_for_drop_test(),
-            handle: 1usize as *mut c_void,
+            handle: ptr::dangling_mut::<c_void>(),
         });
 
         assert_eq!(FREE_CALLS.load(Ordering::SeqCst), 1);

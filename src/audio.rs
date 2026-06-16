@@ -110,6 +110,56 @@ pub fn validate_wav(bytes: &[u8], max_duration_sec: u64) -> Result<WavInfo> {
     })
 }
 
+/// Validate and decode a WAV payload in a single pass, returning both the
+/// parsed header info and the normalized f32 samples. Used on the request path
+/// to avoid parsing the same WAV bytes multiple times.
+pub fn decode_wav(bytes: &[u8], max_duration_sec: u64) -> Result<(WavInfo, Vec<f32>)> {
+    let parsed = parse_wav(bytes)?;
+    let fmt = parsed.fmt;
+    let data = parsed.data;
+
+    if fmt.audio_format != 1 {
+        bail!("invalid WAV: only PCM format tag 1 is supported");
+    }
+    if fmt.channels != 1 {
+        bail!("invalid WAV: audio must be mono");
+    }
+    if fmt.sample_rate != 16_000 {
+        bail!("invalid WAV: sample rate must be 16 kHz");
+    }
+    if fmt.bits_per_sample != 16 {
+        bail!("invalid WAV: sample format must be 16-bit signed little-endian");
+    }
+    if fmt.block_align != 2 {
+        bail!("invalid WAV: block align must be 2 bytes for mono s16le");
+    }
+    if data.len() % 2 != 0 {
+        bail!("invalid WAV: data chunk has odd byte length for s16le audio");
+    }
+
+    let duration_sec = data.len() as f64 / f64::from(fmt.sample_rate * u32::from(fmt.block_align));
+    if duration_sec > max_duration_sec as f64 {
+        bail!(
+            "invalid WAV: duration {:.3}s exceeds limit {}s",
+            duration_sec,
+            max_duration_sec
+        );
+    }
+
+    let samples = data
+        .chunks_exact(2)
+        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32768.0)
+        .collect();
+
+    let info = WavInfo {
+        sample_rate: fmt.sample_rate,
+        channels: fmt.channels,
+        bits_per_sample: fmt.bits_per_sample,
+        duration_sec,
+    };
+    Ok((info, samples))
+}
+
 pub fn wav_pcm_s16le_as_f32(bytes: &[u8]) -> Result<Vec<f32>> {
     let parsed = parse_wav(bytes)?;
     let fmt = parsed.fmt;
@@ -133,13 +183,18 @@ pub fn wav_pcm_s16le_as_f32(bytes: &[u8]) -> Result<Vec<f32>> {
 }
 
 pub fn is_effectively_empty_audio(bytes: &[u8], info: &WavInfo) -> Result<bool> {
-    if info.duration_sec < MIN_TRANSCRIBABLE_DURATION_SEC {
-        return Ok(true);
-    }
-
     let samples = wav_pcm_s16le_as_f32(bytes)?;
+    Ok(is_effectively_empty_samples(&samples, info.duration_sec))
+}
+
+/// Decide whether already-decoded samples are too short or too quiet to be
+/// worth sending to Whisper (which would otherwise hallucinate on silence).
+pub fn is_effectively_empty_samples(samples: &[f32], duration_sec: f64) -> bool {
+    if duration_sec < MIN_TRANSCRIBABLE_DURATION_SEC {
+        return true;
+    }
     if samples.is_empty() {
-        return Ok(true);
+        return true;
     }
 
     let mean_square = samples
@@ -147,7 +202,58 @@ pub fn is_effectively_empty_audio(bytes: &[u8], info: &WavInfo) -> Result<bool> 
         .map(|sample| f64::from(*sample).powi(2))
         .sum::<f64>()
         / samples.len() as f64;
-    Ok(mean_square.sqrt() < SILENCE_RMS_THRESHOLD)
+    mean_square.sqrt() < SILENCE_RMS_THRESHOLD
+}
+
+/// Render segments as SubRip (`.srt`) subtitles.
+pub fn segments_to_srt(segments: &[AudioSegment]) -> String {
+    let mut out = String::new();
+    for (index, segment) in segments.iter().enumerate() {
+        out.push_str(&(index + 1).to_string());
+        out.push_str("\r\n");
+        out.push_str(&format_srt_timestamp(segment.start));
+        out.push_str(" --> ");
+        out.push_str(&format_srt_timestamp(segment.end));
+        out.push_str("\r\n");
+        out.push_str(segment.text.trim());
+        out.push_str("\r\n\r\n");
+    }
+    out
+}
+
+/// Render segments as WebVTT (`.vtt`) subtitles.
+pub fn segments_to_vtt(segments: &[AudioSegment]) -> String {
+    let mut out = String::from("WEBVTT\r\n\r\n");
+    for segment in segments {
+        out.push_str(&format_vtt_timestamp(segment.start));
+        out.push_str(" --> ");
+        out.push_str(&format_vtt_timestamp(segment.end));
+        out.push_str("\r\n");
+        out.push_str(segment.text.trim());
+        out.push_str("\r\n\r\n");
+    }
+    out
+}
+
+fn format_srt_timestamp(seconds: f64) -> String {
+    let (hours, minutes, secs, millis) = split_timestamp(seconds);
+    format!("{hours:02}:{minutes:02}:{secs:02},{millis:03}")
+}
+
+fn format_vtt_timestamp(seconds: f64) -> String {
+    let (hours, minutes, secs, millis) = split_timestamp(seconds);
+    format!("{hours:02}:{minutes:02}:{secs:02}.{millis:03}")
+}
+
+fn split_timestamp(seconds: f64) -> (u64, u64, u64, u64) {
+    let total_millis = (seconds.max(0.0) * 1000.0).round() as u64;
+    let millis = total_millis % 1000;
+    let total_secs = total_millis / 1000;
+    let secs = total_secs % 60;
+    let total_minutes = total_secs / 60;
+    let minutes = total_minutes % 60;
+    let hours = total_minutes / 60;
+    (hours, minutes, secs, millis)
 }
 
 struct ParsedWav<'a> {

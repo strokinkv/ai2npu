@@ -81,7 +81,7 @@ path = "C:/ProgramData/ai2npu/models/strokinkv/bge-m3-int8-ov"
 path = "C:/ProgramData/ai2npu/models/OpenVINO/whisper-large-v3-turbo-int8-ov"
 ```
 
-`idle_timeout_sec` в этой версии должен быть `0`. Это удерживает загруженную модель в памяти после первого обращения.
+Загруженная модель удерживается в памяти после первого обращения; для освобождения ресурсов используйте `ai2npu.exe unload`.
 
 После изменения конфига перезапустите службу:
 

@@ -24,7 +24,7 @@ Use the MSVC toolchain and the OpenVINO SDK archive environment:
 . \scripts\setup-openvino-sdk.ps1 -SdkRoot "C:\path\to\openvino_sdk"
 cmd /c "`"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat`" -arch=x64 -host_arch=x64 && rustup run stable-x86_64-pc-windows-msvc cargo fmt -- --check"
 cmd /c "`"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat`" -arch=x64 -host_arch=x64 && rustup run stable-x86_64-pc-windows-msvc cargo test"
-cmd /c "`"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat`" -arch=x64 -host_arch=x64 && rustup run stable-x86_64-pc-windows-msvc cargo clippy -- -D warnings"
+cmd /c "`"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat`" -arch=x64 -host_arch=x64 && rustup run stable-x86_64-pc-windows-msvc cargo clippy --all-targets -- -D warnings"
 ```
 
 Default tests must stay deterministic. Keep downloaded-model tests behind `AI2NPU_RUN_MODEL_TESTS=1` and live NPU tests behind `AI2NPU_RUN_NPU_TESTS=1`.
@@ -42,7 +42,7 @@ rustup run stable-x86_64-pc-windows-msvc powershell -ExecutionPolicy Bypass -Fil
 
 ## Release Process
 
-Before a release, update versions in `Cargo.toml`, `Cargo.lock`, and `packaging/ai2npu.iss`. Run `cargo fmt -- --check`, `cargo test`, and `cargo clippy -- -D warnings`. Commit with `Release MAJOR.MINOR.PATCH`.
+Before a release, update versions in `Cargo.toml`, `Cargo.lock`, and `packaging/ai2npu.iss`, and add a `CHANGELOG.md` entry for the new version. Run `cargo fmt -- --check`, `cargo test`, and `cargo clippy --all-targets -- -D warnings`. Commit with `Release MAJOR.MINOR.PATCH`.
 
 Push `main`, then create and push an annotated tag:
 

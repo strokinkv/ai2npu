@@ -184,6 +184,7 @@ extern "C" AI2NPU_BRIDGE_API int ai2npu_whisper_transcribe(
     const char* task,
     const char* language,
     const char* prompt,
+    float temperature,
     bool return_timestamps,
     char** json_out,
     char** error) {
@@ -205,6 +206,9 @@ extern "C" AI2NPU_BRIDGE_API int ai2npu_whisper_transcribe(
         config.return_timestamps = return_timestamps;
         config.word_timestamps = false;
         config.max_new_tokens = max_new_tokens_from_env();
+        if (temperature >= 0.0f) {
+            config.temperature = temperature;
+        }
         if (language != nullptr && language[0] != '\0') {
             std::string token = language;
             if (token.rfind("<|", 0) != 0) {

@@ -54,6 +54,20 @@ $response.data[0].embedding.Count
 
 Ожидаемый размер embedding для BGE-M3: `1024`.
 
+## API эндпоинты
+
+Служба слушает `http://127.0.0.1:9555` и предоставляет OpenAI-совместимые и служебные эндпоинты:
+
+- `POST /v1/embeddings` — эмбеддинги BGE-M3.
+- `POST /v1/audio/transcriptions` — транскрибация Whisper (форматы ответа: `json`, `verbose_json`, `text`, `srt`, `vtt`).
+- `POST /v1/audio/translations` — перевод аудио в английский текст.
+- `GET /v1/models` — список включённых моделей.
+- `GET /health` — статус службы, NPU/OpenVINO, загруженные модели и очередь.
+- `GET /logs?lines=N` — последние строки лог-файла (по умолчанию 200).
+- `POST /admin/models/unload` — выгрузка загруженных моделей без остановки службы (см. `ai2npu unload`).
+
+Все эндпоинты доступны только с loopback-адреса и без аутентификации, что рассчитано на локальное использование.
+
 ## Ограничения
 
 - Нужны Windows 11, Intel NPU driver и доступный OpenVINO NPU device.
@@ -72,6 +86,10 @@ English version:
 - [docs/installation-and-operation.en.md](docs/installation-and-operation.en.md)
 - [docs/development-setup-and-build.en.md](docs/development-setup-and-build.en.md)
 - [docs/openvino-sdk-setup.en.md](docs/openvino-sdk-setup.en.md)
+
+## Изменения
+
+История версий — в [CHANGELOG.md](CHANGELOG.md).
 
 ## Разработка
 

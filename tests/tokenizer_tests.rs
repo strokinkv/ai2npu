@@ -18,7 +18,7 @@ fn tokenizer_pads_to_512_tokens() {
 
     assert_eq!(encoded.input_ids.len(), 512);
     assert_eq!(encoded.attention_mask.len(), 512);
-    assert!(encoded.attention_mask.iter().any(|value| *value == 1));
+    assert!(encoded.attention_mask.contains(&1));
 }
 
 #[test]
@@ -29,8 +29,7 @@ fn tokenizer_truncates_long_input_to_512_tokens() {
     }
 
     let tokenizer = BgeTokenizer::from_model_dir(BGE_MODEL_DIR).unwrap();
-    let text = std::iter::repeat("hello")
-        .take(2000)
+    let text = std::iter::repeat_n("hello", 2000)
         .collect::<Vec<_>>()
         .join(" ");
     let encoded = tokenizer.encode(&text).unwrap();

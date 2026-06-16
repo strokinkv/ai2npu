@@ -46,7 +46,11 @@ pub fn init_file_logging(config: &LoggingConfig) -> Result<()> {
     if let Err(error) = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_ansi(false)
-        .with_writer(LogFileMakeWriter { path })
+        .with_writer(LogFileMakeWriter {
+            path,
+            max_size_bytes,
+            max_files: config.max_files,
+        })
         .try_init()
     {
         tracing::debug!("file logging subscriber was not installed: {error}");
@@ -97,12 +101,17 @@ fn rotated_path(path: &Path, index: usize) -> PathBuf {
 
 struct LogFileMakeWriter {
     path: PathBuf,
+    max_size_bytes: u64,
+    max_files: usize,
 }
 
 impl<'a> MakeWriter<'a> for LogFileMakeWriter {
     type Writer = LogFileWriter;
 
     fn make_writer(&'a self) -> Self::Writer {
+        // Rotate before each write so a long-running service keeps the active
+        // log file under the configured size limit, not only at startup.
+        let _ = rotate_log_file(&self.path, self.max_size_bytes, self.max_files);
         let writer: Box<dyn Write + Send> = match open_log_file(&self.path) {
             Ok(file) => Box::new(file),
             Err(_) => Box::new(io::sink()),

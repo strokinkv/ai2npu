@@ -46,42 +46,6 @@ normalize = true
 }
 
 #[test]
-fn rejects_non_zero_idle_timeout() {
-    let text = r#"
-[server]
-host = "127.0.0.1"
-port = 9555
-request_body_limit_mb = 100
-thread_count = 16
-
-[queue]
-max_pending_requests = 10
-default_timeout_sec = 600
-
-[logging]
-level = "info"
-directory = "logs"
-max_file_size_mb = 10
-max_files = 10
-
-[[models]]
-id = "BAAI/bge-m3"
-type = "embedding"
-path = "models/strokinkv/bge-m3-int8-ov"
-enabled = true
-preload = false
-idle_timeout_sec = 3600
-queue_timeout_sec = 600
-normalize = true
-"#;
-    let cfg: AppConfig = toml::from_str(text).unwrap();
-
-    let err = cfg.validate().unwrap_err().to_string();
-
-    assert!(err.contains("idle_timeout_sec must be 0"));
-}
-
-#[test]
 fn rejects_duplicate_model_ids() {
     let text = r#"
 [server]

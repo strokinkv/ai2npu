@@ -1,5 +1,5 @@
 #define MyAppName "ai2npu"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "ai2npu"
 #define DistDir "..\dist\ai2npu"
 
@@ -131,7 +131,6 @@ begin
     'path = ''' + ModelRoot + '\strokinkv\bge-m3-int8-ov''' + #13#10 +
     'enabled = true' + #13#10 +
     'preload = false' + #13#10 +
-    'idle_timeout_sec = 0' + #13#10 +
     'queue_timeout_sec = 600' + #13#10 +
     'normalize = true' + #13#10;
   end;
@@ -145,7 +144,6 @@ begin
     'path = ''' + ModelRoot + '\OpenVINO\whisper-large-v3-turbo-int8-ov''' + #13#10 +
     'enabled = true' + #13#10 +
     'preload = false' + #13#10 +
-    'idle_timeout_sec = 0' + #13#10 +
     'queue_timeout_sec = 600' + #13#10 +
     'max_audio_duration_sec = 1800' + #13#10;
   end;

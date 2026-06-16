@@ -49,7 +49,6 @@ pub struct ModelConfig {
     pub path: PathBuf,
     pub enabled: bool,
     pub preload: bool,
-    pub idle_timeout_sec: u64,
     pub queue_timeout_sec: u64,
     #[serde(default)]
     pub normalize: Option<bool>,
@@ -140,9 +139,6 @@ fn validate_model(model: &ModelConfig) -> Result<()> {
     }
     if model.queue_timeout_sec == 0 {
         bail!("models.queue_timeout_sec must be greater than 0");
-    }
-    if model.idle_timeout_sec != 0 {
-        bail!("models.idle_timeout_sec must be 0");
     }
 
     match model.model_type {

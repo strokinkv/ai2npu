@@ -28,6 +28,7 @@ AI2NPU_BRIDGE_API int ai2npu_whisper_transcribe(
     const char* task,
     const char* language,
     const char* prompt,
+    float temperature,
     bool return_timestamps,
     char** json_out,
     char** error);

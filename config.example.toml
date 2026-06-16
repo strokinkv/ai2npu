@@ -36,8 +36,6 @@ path = "models/strokinkv/bge-m3-int8-ov"
 enabled = true
 # Preload model on startup. Default: false
 preload = false
-# Idle timeout in seconds. Must be 0 in this version.
-idle_timeout_sec = 0
 # Per-model queue timeout in seconds. Default: 600
 queue_timeout_sec = 600
 # Normalize embedding vectors. Default: true
@@ -54,8 +52,6 @@ path = "models/OpenVINO/whisper-large-v3-turbo-int8-ov"
 enabled = true
 # Preload model on startup. Default: false
 preload = false
-# Idle timeout in seconds. Must be 0 in this version.
-idle_timeout_sec = 0
 # Per-model queue timeout in seconds. Default: 600
 queue_timeout_sec = 600
 # Maximum accepted audio duration in seconds. Default: 1800

@@ -152,15 +152,17 @@ fn native_whisper_executor_returns_text_when_enabled() {
         .find(|model| model.id == "openai/whisper-large-v3-turbo")
         .unwrap();
     let wav = wav_header(1, 16_000, 16, 1, 32_000);
+    let samples = wav_pcm_s16le_as_f32(&wav).unwrap();
     let executor = NativeWhisperExecutor::new().unwrap();
     let output = executor
         .transcribe(
             model,
-            &wav,
+            &samples,
             &AudioInferenceOptions {
                 endpoint: AudioEndpoint::Transcriptions,
                 language: None,
                 prompt: None,
+                temperature: None,
                 return_timestamps: false,
             },
         )

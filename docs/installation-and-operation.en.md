@@ -81,7 +81,7 @@ path = "C:/ProgramData/ai2npu/models/strokinkv/bge-m3-int8-ov"
 path = "C:/ProgramData/ai2npu/models/OpenVINO/whisper-large-v3-turbo-int8-ov"
 ```
 
-`idle_timeout_sec` must be `0` in this version. That keeps loaded native model sessions alive after first use.
+Loaded model sessions stay alive after first use; run `ai2npu.exe unload` to release resources without stopping the service.
 
 After editing the config, restart the service:
 

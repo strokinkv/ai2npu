@@ -1,13 +1,34 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result};
+use thiserror::Error;
 
-use crate::audio::{wav_pcm_s16le_as_f32, AudioEndpoint, AudioOutput};
+use crate::audio::{AudioEndpoint, AudioOutput};
 use crate::bge_embeddings::BgeEmbeddingExecutor;
 use crate::config::ModelConfig;
 use crate::genai_bridge::{GenAiWhisperBridge, GenAiWhisperSession};
+
+/// Wraps an error that occurred while loading or compiling a model so the HTTP
+/// layer can map it to the `model_load_failed` API error code.
+#[derive(Debug, Error)]
+#[error("{0:#}")]
+pub struct ModelLoadFailed(pub anyhow::Error);
+
+/// Wraps an error that occurred while running inference so the HTTP layer can
+/// map it to the `inference_failed` API error code.
+#[derive(Debug, Error)]
+#[error("{0:#}")]
+pub struct InferenceFailed(pub anyhow::Error);
+
+/// Recover the inner guard from a poisoned mutex instead of panicking, so a
+/// single panicked inference job cannot permanently break the service.
+pub(crate) fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 pub trait EmbeddingExecutor: Send + Sync {
     fn embed(&self, model: &ModelConfig, input: &[String]) -> Result<Vec<Vec<f32>>>;
@@ -27,18 +48,19 @@ pub trait AudioExecutor: Send + Sync {
     fn transcribe(
         &self,
         model: &ModelConfig,
-        wav_bytes: &[u8],
+        samples: &[f32],
         options: &AudioInferenceOptions,
     ) -> Result<AudioOutput>;
     fn preload(&self, model: &ModelConfig) -> Result<()> {
-        let wav = silent_wav_100ms();
+        let samples = vec![0.0_f32; 1_600];
         self.transcribe(
             model,
-            &wav,
+            &samples,
             &AudioInferenceOptions {
                 endpoint: AudioEndpoint::Transcriptions,
                 language: None,
                 prompt: None,
+                temperature: None,
                 return_timestamps: false,
             },
         )
@@ -57,6 +79,7 @@ pub struct AudioInferenceOptions {
     pub endpoint: AudioEndpoint,
     pub language: Option<String>,
     pub prompt: Option<String>,
+    pub temperature: Option<f32>,
     pub return_timestamps: bool,
 }
 
@@ -150,28 +173,24 @@ impl NativeWhisperExecutor {
     fn transcribe_native(
         &self,
         model: &ModelConfig,
-        wav_bytes: &[u8],
+        samples: &[f32],
         options: &AudioInferenceOptions,
     ) -> Result<AudioOutput> {
-        let samples = wav_pcm_s16le_as_f32(wav_bytes)?;
-        let mut sessions = self
-            .sessions
-            .lock()
-            .expect("native whisper session mutex poisoned");
+        let mut sessions = lock_recover(&self.sessions);
         if !sessions.contains_key(&model.path) {
-            sessions.insert(
-                model.path.clone(),
-                self.bridge.create_session(&model.path, &self.device)?,
-            );
+            let session = self
+                .bridge
+                .create_session(&model.path, &self.device)
+                .map_err(ModelLoadFailed)?;
+            sessions.insert(model.path.clone(), session);
         }
         let session = sessions
             .get(&model.path)
             .expect("native whisper session exists");
-        let output = session.transcribe(&samples, options)?;
-        let mut loaded = self
-            .loaded_models
-            .lock()
-            .expect("loaded model mutex poisoned");
+        let output = session
+            .transcribe(samples, options)
+            .map_err(InferenceFailed)?;
+        let mut loaded = lock_recover(&self.loaded_models);
         if !loaded.iter().any(|id| id == &model.id) {
             loaded.push(model.id.clone());
         }
@@ -183,50 +202,21 @@ impl AudioExecutor for NativeWhisperExecutor {
     fn transcribe(
         &self,
         model: &ModelConfig,
-        wav_bytes: &[u8],
+        samples: &[f32],
         options: &AudioInferenceOptions,
     ) -> Result<AudioOutput> {
-        self.transcribe_native(model, wav_bytes, options)
+        self.transcribe_native(model, samples, options)
     }
 
     fn loaded_models(&self) -> Vec<String> {
-        self.loaded_models
-            .lock()
-            .expect("loaded model mutex poisoned")
-            .clone()
+        lock_recover(&self.loaded_models).clone()
     }
 
     fn unload_all(&self) -> Result<usize> {
-        let mut sessions = self
-            .sessions
-            .lock()
-            .expect("native whisper session mutex poisoned");
+        let mut sessions = lock_recover(&self.sessions);
         let unloaded = sessions.len();
         sessions.clear();
-        self.loaded_models
-            .lock()
-            .expect("loaded model mutex poisoned")
-            .clear();
+        lock_recover(&self.loaded_models).clear();
         Ok(unloaded)
     }
-}
-
-fn silent_wav_100ms() -> Vec<u8> {
-    let data_len = 16_000u32 / 10 * 2;
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
-    bytes.extend_from_slice(b"WAVE");
-    bytes.extend_from_slice(b"fmt ");
-    bytes.extend_from_slice(&16u32.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&16_000u32.to_le_bytes());
-    bytes.extend_from_slice(&32_000u32.to_le_bytes());
-    bytes.extend_from_slice(&2u16.to_le_bytes());
-    bytes.extend_from_slice(&16u16.to_le_bytes());
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&data_len.to_le_bytes());
-    bytes.resize(bytes.len() + data_len as usize, 0);
-    bytes
 }

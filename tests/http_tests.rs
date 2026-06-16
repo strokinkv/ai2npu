@@ -41,7 +41,7 @@ impl AudioExecutor for StaticAudioExecutor {
     fn transcribe(
         &self,
         _model: &ModelConfig,
-        _wav_bytes: &[u8],
+        _samples: &[f32],
         _options: &AudioInferenceOptions,
     ) -> Result<AudioOutput> {
         Ok(self.output.clone())

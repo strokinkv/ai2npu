@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::audio::{
-    is_effectively_empty_audio, validate_wav, AudioEndpoint, AudioJsonResponse,
-    AudioMultipartRequest, AudioOutput, AudioResponseFormat,
+    decode_wav, is_effectively_empty_samples, segments_to_srt, segments_to_vtt, AudioEndpoint,
+    AudioJsonResponse, AudioMultipartRequest, AudioOutput, AudioResponseFormat,
 };
 use crate::config::{AppConfig, ModelType};
 use crate::embeddings::{
@@ -23,7 +23,7 @@ use crate::embeddings::{
 use crate::error::ApiError;
 use crate::inference::{
     audio_executor_from_env, embedding_executor_from_env, AudioExecutor, AudioInferenceOptions,
-    EmbeddingExecutor,
+    EmbeddingExecutor, InferenceFailed, ModelLoadFailed,
 };
 use crate::logs::tail_log_file;
 use crate::openvino_backend::OpenVinoStatus;
@@ -51,8 +51,6 @@ pub fn build_router_with_executors(
         .server
         .request_body_limit_mb
         .saturating_mul(1024 * 1024);
-    preload_models(&config, &embedding_executor, &audio_executor)
-        .expect("failed to preload configured models");
     let state = AppState {
         config: Arc::new(config),
         openvino,
@@ -101,7 +99,7 @@ async fn enforce_body_limit(
     next.run(request).await
 }
 
-fn preload_models(
+pub fn preload_models(
     config: &AppConfig,
     embedding_executor: &Arc<dyn EmbeddingExecutor>,
     audio_executor: &Arc<dyn AudioExecutor>,
@@ -163,16 +161,15 @@ async fn create_audio(
             "timestamp_granularities is not supported for translations",
         ));
     }
+    let temperature = parse_temperature(request.temperature.as_deref())?;
 
     let file = request
         .file
         .clone()
         .ok_or_else(|| ApiError::invalid_request("audio file is required"))?;
-    let wav_info = validate_wav(&file, model.max_audio_duration_sec.unwrap_or(1800))
+    let (wav_info, samples) = decode_wav(&file, model.max_audio_duration_sec.unwrap_or(1800))
         .map_err(|error| ApiError::invalid_audio_format(error.to_string()))?;
-    if is_effectively_empty_audio(&file, &wav_info)
-        .map_err(|error| ApiError::invalid_audio_format(error.to_string()))?
-    {
+    if is_effectively_empty_samples(&samples, wav_info.duration_sec) {
         return Ok(audio_response(
             response_format,
             AudioOutput {
@@ -183,15 +180,20 @@ async fn create_audio(
             },
         ));
     }
-    let return_timestamps = response_format == AudioResponseFormat::VerboseJson
+    ensure_npu_ready(&state.openvino)?;
+    let return_timestamps = matches!(
+        response_format,
+        AudioResponseFormat::Srt | AudioResponseFormat::Vtt
+    ) || (response_format == AudioResponseFormat::VerboseJson
         && request
             .timestamp_granularities
             .iter()
-            .any(|value| value == "segment" || value == "word");
+            .any(|value| value == "segment" || value == "word"));
     let options = AudioInferenceOptions {
         endpoint,
         language: request.language.clone(),
         prompt: request.prompt.clone(),
+        temperature,
         return_timestamps,
     };
     let executor = Arc::clone(&state.audio_executor);
@@ -201,7 +203,7 @@ async fn create_audio(
     let job = InferenceJob::new(move || {
         let _guard =
             CurrentRequestGuard::new(&current_request, format!("{endpoint:?} {}", model.id));
-        let mut output = executor.transcribe(&model, &file, &options)?;
+        let mut output = executor.transcribe(&model, &samples, &options)?;
         if output.duration == 0.0 {
             output.duration = wav_info.duration_sec;
         }
@@ -237,10 +239,62 @@ fn audio_response(response_format: AudioResponseFormat, output: AudioOutput) -> 
             })),
         )
             .into_response(),
-        AudioResponseFormat::Text | AudioResponseFormat::Srt | AudioResponseFormat::Vtt => {
-            (StatusCode::OK, output.text).into_response()
+        AudioResponseFormat::Text => (StatusCode::OK, output.text).into_response(),
+        AudioResponseFormat::Srt => {
+            (StatusCode::OK, segments_to_srt(&subtitle_segments(&output))).into_response()
+        }
+        AudioResponseFormat::Vtt => {
+            (StatusCode::OK, segments_to_vtt(&subtitle_segments(&output))).into_response()
         }
     }
+}
+
+/// Build the segment list used to render SRT/VTT output. When the model returns
+/// text without timestamps, synthesize a single segment spanning the clip so the
+/// transcription is not lost in subtitle formats.
+fn subtitle_segments(output: &AudioOutput) -> Vec<crate::audio::AudioSegment> {
+    if !output.segments.is_empty() || output.text.is_empty() {
+        return output.segments.clone();
+    }
+    vec![crate::audio::AudioSegment {
+        start: 0.0,
+        end: output.duration,
+        text: output.text.clone(),
+    }]
+}
+
+fn parse_temperature(value: Option<&str>) -> Result<Option<f32>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let parsed: f32 = trimmed
+        .parse()
+        .map_err(|_| ApiError::invalid_request(format!("temperature must be a number: {value}")))?;
+    if !(0.0..=1.0).contains(&parsed) {
+        return Err(ApiError::invalid_request(
+            "temperature must be between 0.0 and 1.0",
+        ));
+    }
+    Ok(Some(parsed))
+}
+
+/// Reject inference requests early when the OpenVINO runtime or NPU device is
+/// unavailable, mapping to the documented `openvino_unavailable` /
+/// `npu_unavailable` error codes.
+fn ensure_npu_ready(openvino: &OpenVinoStatus) -> Result<(), ApiError> {
+    if !openvino.runtime_available {
+        return Err(ApiError::openvino_unavailable(
+            "OpenVINO runtime is not available",
+        ));
+    }
+    if !openvino.npu_available {
+        return Err(ApiError::npu_unavailable("NPU device is not available"));
+    }
+    Ok(())
 }
 
 async fn parse_audio_multipart(
@@ -310,6 +364,7 @@ pub async fn serve_until(
     tracing::info!("embedding executor: {:?}", selection.kind());
     let executor = selection.into_executor();
     let audio_executor = audio_executor_from_env()?;
+    preload_models(&config, &executor, &audio_executor)?;
     let router = build_router_with_executors(config, openvino, executor, audio_executor);
 
     tracing::info!("listening on http://{}", addr);
@@ -420,6 +475,7 @@ async fn create_embeddings(
     let input = normalize_input(request.input)
         .map_err(|error| ApiError::invalid_request(error.to_string()))?;
 
+    ensure_npu_ready(&state.openvino)?;
     let executor = Arc::clone(&state.embedding_executor);
     let current_request = Arc::clone(&state.current_request);
     let queue_timeout = Duration::from_secs(model.queue_timeout_sec);
@@ -471,7 +527,15 @@ fn queue_error_to_api(error: QueueError) -> ApiError {
         QueueError::Full => ApiError::queue_full("queue is full"),
         QueueError::Closed => ApiError::internal("queue worker is closed"),
         QueueError::Timeout => ApiError::queue_timeout("queue wait timed out"),
-        QueueError::Job(error) => ApiError::internal(error.to_string()),
+        QueueError::Job(error) => {
+            if error.downcast_ref::<ModelLoadFailed>().is_some() {
+                ApiError::model_load_failed(error.to_string())
+            } else if error.downcast_ref::<InferenceFailed>().is_some() {
+                ApiError::inference_failed(error.to_string())
+            } else {
+                ApiError::internal(error.to_string())
+            }
+        }
     }
 }
 

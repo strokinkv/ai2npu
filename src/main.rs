@@ -19,7 +19,7 @@ fn main() -> Result<()> {
             ai2npu::logs::init_file_logging(&cfg.logging)?;
             tracing::info!("starting ai2npu console host");
             let openvino = OpenVinoStatus::detect();
-            tokio::runtime::Runtime::new()?.block_on(serve(cfg, openvino))?;
+            build_runtime(cfg.server.thread_count)?.block_on(serve(cfg, openvino))?;
         }
         Command::RunService { config } => {
             windows_service::run_service(config)?;
@@ -53,8 +53,20 @@ fn main() -> Result<()> {
         }
         Command::ValidateConfig { config } => {
             let path = config.unwrap_or_else(default_config_path);
-            AppConfig::load(&path)?;
+            let cfg = AppConfig::load(&path)?;
             println!("config valid: {}", path.display());
+            let registry = ai2npu::model_registry::ModelRegistry::new(cfg);
+            for status in registry.validate_bundles() {
+                if status.valid {
+                    println!("model bundle ok: {} ({})", status.id, status.model_type);
+                } else {
+                    println!(
+                        "model bundle incomplete: {} missing {}",
+                        status.id,
+                        status.missing_files.join(", ")
+                    );
+                }
+            }
         }
         Command::CheckNpu => {
             let status = OpenVinoStatus::detect();
@@ -91,6 +103,14 @@ fn main() -> Result<()> {
 
 fn default_config_path() -> PathBuf {
     PathBuf::from(r"C:\ProgramData\ai2npu\config.toml")
+}
+
+fn build_runtime(worker_threads: usize) -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads.max(1))
+        .enable_all()
+        .build()
+        .map_err(Into::into)
 }
 
 fn configure_runtime_environment(cfg: &AppConfig) -> Result<()> {

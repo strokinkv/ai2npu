@@ -72,7 +72,6 @@ type = \"embedding\"\r\n",
         text.push_str(
             "enabled = true\r\n\
 preload = false\r\n\
-idle_timeout_sec = 0\r\n\
 queue_timeout_sec = 600\r\n\
 normalize = true\r\n",
         );
@@ -94,7 +93,6 @@ type = \"whisper\"\r\n",
         text.push_str(
             "enabled = true\r\n\
 preload = false\r\n\
-idle_timeout_sec = 0\r\n\
 queue_timeout_sec = 600\r\n\
 max_audio_duration_sec = 1800\r\n",
         );
@@ -279,12 +277,28 @@ fn run_service_main(arguments: Vec<std::ffi::OsString>) -> Result<()> {
 
     status_handle.set_service_status(service_status(ServiceState::StartPending))?;
 
-    let runtime = tokio::runtime::Runtime::new()?;
-    status_handle.set_service_status(service_status(ServiceState::Running))?;
-    let result = runtime.block_on(async move {
-        let cfg = crate::config::AppConfig::load(config)?;
+    // Load configuration before building the runtime so the worker thread count
+    // honors server.thread_count. Report Stopped if early startup fails.
+    let startup = (|| -> Result<(crate::config::AppConfig, tokio::runtime::Runtime)> {
+        let cfg = crate::config::AppConfig::load(&config)?;
         configure_runtime_environment(&cfg)?;
         crate::logs::init_file_logging(&cfg.logging)?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(cfg.server.thread_count.max(1))
+            .enable_all()
+            .build()?;
+        Ok((cfg, runtime))
+    })();
+    let (cfg, runtime) = match startup {
+        Ok(value) => value,
+        Err(error) => {
+            status_handle.set_service_status(service_status(ServiceState::Stopped))?;
+            return Err(error);
+        }
+    };
+
+    status_handle.set_service_status(service_status(ServiceState::Running))?;
+    let result = runtime.block_on(async move {
         tracing::info!("starting ai2npu windows service");
         let openvino = crate::openvino_backend::OpenVinoStatus::detect();
         crate::http::serve_until(cfg, openvino, async {
