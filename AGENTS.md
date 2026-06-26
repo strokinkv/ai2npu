@@ -1,5 +1,17 @@
 # Repository Guidelines
 
+## Active Work / Handoff
+
+Current focus: streaming ASR for the **Marvin** voice assistant (ai2npu = Component 1, the
+NPU model host). Read these before starting (some live under gitignored `docs/superpowers/`,
+present on disk):
+- `docs/marvin-context.md` — ai2npu's role, boundary, and OpenAI-Realtime ASR contract (D5).
+- `docs/superpowers/specs/2026-06-26-streaming-dictation-asr-design.md` — ASR design spec.
+- `docs/superpowers/plans/2026-06-26-streaming-dictation-and-stabilization.md` — step-by-step
+  plan: Phase 0 (bug fixes from `TODO.md`) then Phase 1 (streaming, gated by an NPU RTF spike).
+- `TODO.md` — known bugs and recommendations.
+- System architecture (all components) lives in the neighboring repo `~/projects/marvin`.
+
 ## Communication
 
 Think in English. Answer user-facing summaries and questions in Russian. Keep responses brief and practical.
