@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,7 +41,7 @@ struct QueuedJob {
 pub struct InferenceQueue {
     tx: mpsc::Sender<QueuedJob>,
     capacity: Arc<Semaphore>,
-    max_pending: usize,
+    active: Arc<AtomicUsize>,
 }
 
 #[derive(Debug, Error)]
@@ -59,6 +60,8 @@ impl InferenceQueue {
     pub fn new(max_pending: usize) -> Self {
         let (tx, mut rx) = mpsc::channel::<QueuedJob>(max_pending.max(1));
         let capacity = Arc::new(Semaphore::new(max_pending));
+        let active = Arc::new(AtomicUsize::new(0));
+        let worker_active = Arc::clone(&active);
 
         tokio::spawn(async move {
             while let Some(queued) = rx.recv().await {
@@ -70,6 +73,7 @@ impl InferenceQueue {
                 } = queued;
                 drop(_permit);
                 if started_tx.send(()).is_err() {
+                    worker_active.fetch_sub(1, Ordering::SeqCst);
                     continue;
                 }
                 let result = tokio::task::spawn_blocking(move || (job.operation)())
@@ -77,6 +81,7 @@ impl InferenceQueue {
                     .unwrap_or_else(|error| {
                         Err(anyhow::anyhow!("queue worker join failed: {error}"))
                     });
+                worker_active.fetch_sub(1, Ordering::SeqCst);
                 let _ = response_tx.send(result);
             }
         });
@@ -84,7 +89,7 @@ impl InferenceQueue {
         Self {
             tx,
             capacity,
-            max_pending,
+            active,
         }
     }
 
@@ -110,11 +115,13 @@ impl InferenceQueue {
     ) -> impl Future<Output = Result<InferenceOutput, QueueError>> {
         let tx = self.tx.clone();
         let capacity = Arc::clone(&self.capacity);
+        let active = Arc::clone(&self.active);
 
         async move {
             let (response_tx, response_rx) = oneshot::channel();
             let (started_tx, started_rx) = oneshot::channel();
             let permit = capacity.try_acquire_owned().map_err(|_| QueueError::Full)?;
+            active.fetch_add(1, Ordering::SeqCst);
             let queued = QueuedJob {
                 job,
                 started_tx,
@@ -123,6 +130,7 @@ impl InferenceQueue {
             };
 
             if let Err(error) = tx.try_send(queued) {
+                active.fetch_sub(1, Ordering::SeqCst);
                 return match error {
                     mpsc::error::TrySendError::Full(_) => Err(QueueError::Full),
                     mpsc::error::TrySendError::Closed(_) => Err(QueueError::Closed),
@@ -151,7 +159,6 @@ impl InferenceQueue {
     }
 
     pub fn pending_len(&self) -> usize {
-        self.max_pending
-            .saturating_sub(self.capacity.available_permits())
+        self.active.load(Ordering::SeqCst)
     }
 }
