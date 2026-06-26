@@ -3,7 +3,8 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::extract::{Json as JsonExtractor, Multipart, Query, Request, State};
+use axum::body::{to_bytes, Body};
+use axum::extract::{DefaultBodyLimit, Json as JsonExtractor, Multipart, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -47,10 +48,7 @@ pub fn build_router_with_executors(
     audio_executor: Arc<dyn AudioExecutor>,
 ) -> Router {
     let max_pending_requests = config.queue.max_pending_requests;
-    let request_body_limit_bytes = config
-        .server
-        .request_body_limit_mb
-        .saturating_mul(1024 * 1024);
+    let request_body_limit_bytes = request_body_limit_bytes(&config);
     let state = AppState {
         config: Arc::new(config),
         openvino,
@@ -74,7 +72,17 @@ pub fn build_router_with_executors(
             request_body_limit_bytes,
             enforce_body_limit,
         ))
+        .layer(DefaultBodyLimit::max(
+            usize::try_from(request_body_limit_bytes).unwrap_or(usize::MAX),
+        ))
         .with_state(state)
+}
+
+fn request_body_limit_bytes(config: &AppConfig) -> u64 {
+    config
+        .server
+        .request_body_limit_mb
+        .saturating_mul(1024 * 1024)
 }
 
 async fn enforce_body_limit(
@@ -95,6 +103,19 @@ async fn enforce_body_limit(
             .into_response();
         }
     }
+
+    let limit = usize::try_from(limit_bytes).unwrap_or(usize::MAX);
+    let (parts, body) = request.into_parts();
+    let body_bytes = match to_bytes(body, limit).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return ApiError::payload_too_large(format!(
+                "request body exceeds configured limit of {limit_bytes} bytes"
+            ))
+            .into_response();
+        }
+    };
+    let request = Request::from_parts(parts, Body::from(body_bytes));
 
     next.run(request).await
 }
