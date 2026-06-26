@@ -19,6 +19,10 @@ fn tokenizer_pads_to_512_tokens() {
     assert_eq!(encoded.input_ids.len(), 512);
     assert_eq!(encoded.attention_mask.len(), 512);
     assert!(encoded.attention_mask.contains(&1));
+    assert!(
+        !encoded.truncated,
+        "short input must not be flagged truncated"
+    );
 }
 
 #[test]
@@ -36,4 +40,5 @@ fn tokenizer_truncates_long_input_to_512_tokens() {
 
     assert_eq!(encoded.input_ids.len(), 512);
     assert_eq!(encoded.attention_mask.len(), 512);
+    assert!(encoded.truncated, "long input must be flagged truncated");
 }

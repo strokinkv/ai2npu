@@ -6,9 +6,16 @@ pub struct BgeTokenizer {
     tokenizer: Tokenizer,
 }
 
+/// Maximum number of tokens BGE input is truncated to. The model on the NPU has
+/// a static input shape of 512 tokens; longer inputs are silently truncated by
+/// the tokenizer, so callers should surface [`EncodedInput::truncated`].
+pub const MAX_TOKENS: usize = 512;
+
 pub struct EncodedInput {
     pub input_ids: Vec<i64>,
     pub attention_mask: Vec<i64>,
+    /// `true` when the input exceeded [`MAX_TOKENS`] and was truncated.
+    pub truncated: bool,
 }
 
 impl BgeTokenizer {
@@ -19,12 +26,12 @@ impl BgeTokenizer {
 
         tokenizer
             .with_truncation(Some(TruncationParams {
-                max_length: 512,
+                max_length: MAX_TOKENS,
                 ..Default::default()
             }))
             .map_err(|err| anyhow!("failed to configure tokenizer truncation: {err}"))?;
         tokenizer.with_padding(Some(PaddingParams {
-            strategy: PaddingStrategy::Fixed(512),
+            strategy: PaddingStrategy::Fixed(MAX_TOKENS),
             ..Default::default()
         }));
 
@@ -48,6 +55,9 @@ impl BgeTokenizer {
                 .iter()
                 .map(|value| i64::from(*value))
                 .collect(),
+            // The tokenizer stores tokens that did not fit `MAX_TOKENS` as
+            // overflowing encodings; a non-empty list means we truncated.
+            truncated: !encoding.get_overflowing().is_empty(),
         })
     }
 }
