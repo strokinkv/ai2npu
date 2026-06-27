@@ -35,6 +35,9 @@ default_min_silence_ms = 400
 default_max_segment_ms = 30000
 # Maximum buffered input audio per session, in seconds. Default: 30
 max_input_buffer_sec = 30
+# Partial-result latency in ms. Must be lower than default_min_silence_ms.
+# 0 disables partials; each partial runs Whisper on the NPU. Default: 250
+partial_silence_ms = 250
 
 
 [[models]]

@@ -50,6 +50,8 @@ pub struct StreamingConfig {
     pub default_min_silence_ms: u64,
     pub default_max_segment_ms: u64,
     pub max_input_buffer_sec: u64,
+    #[serde(default)]
+    pub partial_silence_ms: u64,
 }
 
 /// One configured OpenAI-compatible model endpoint.
@@ -157,6 +159,13 @@ fn validate_streaming(streaming: &StreamingConfig) -> Result<()> {
     }
     if streaming.max_input_buffer_sec == 0 {
         bail!("streaming.max_input_buffer_sec must be greater than 0");
+    }
+    if streaming.partial_silence_ms != 0
+        && streaming.partial_silence_ms >= streaming.default_min_silence_ms
+    {
+        bail!(
+            "streaming.partial_silence_ms must be 0 (disabled) or less than default_min_silence_ms"
+        );
     }
 
     Ok(())

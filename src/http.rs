@@ -118,12 +118,14 @@ fn default_streaming_vad_factory(config: &AppConfig) -> StreamingVadFactory {
         let streaming = streaming
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("streaming is not configured"))?;
-        Ok(Box::new(VadSegmenter::new(
+        let mut vad = VadSegmenter::new(
             &streaming.vad_model_path,
             streaming.default_min_silence_ms,
             0.5,
             streaming.default_max_segment_ms,
-        )?))
+        )?;
+        vad.set_partial_silence_ms(streaming.partial_silence_ms);
+        Ok(Box::new(vad))
     })
 }
 

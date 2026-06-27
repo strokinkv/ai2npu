@@ -191,6 +191,71 @@ max_input_buffer_sec = 30
 }
 
 #[test]
+fn rejects_partial_silence_ge_min_silence() {
+    let text = r#"
+[server]
+host = "127.0.0.1"
+port = 9555
+request_body_limit_mb = 100
+thread_count = 16
+
+[queue]
+max_pending_requests = 10
+default_timeout_sec = 600
+
+[logging]
+level = "info"
+directory = "logs"
+max_file_size_mb = 10
+max_files = 10
+
+[streaming]
+enabled = true
+vad_model_path = "models/silero_vad.onnx"
+default_min_silence_ms = 400
+default_max_segment_ms = 30000
+max_input_buffer_sec = 30
+partial_silence_ms = 400
+"#;
+    let cfg: AppConfig = toml::from_str(text).unwrap();
+
+    let err = cfg.validate().unwrap_err().to_string();
+
+    assert!(err.contains("partial_silence_ms"), "got: {err}");
+}
+
+#[test]
+fn partial_silence_ms_defaults_to_zero_when_absent() {
+    let text = r#"
+[server]
+host = "127.0.0.1"
+port = 9555
+request_body_limit_mb = 100
+thread_count = 16
+
+[queue]
+max_pending_requests = 10
+default_timeout_sec = 600
+
+[logging]
+level = "info"
+directory = "logs"
+max_file_size_mb = 10
+max_files = 10
+
+[streaming]
+enabled = true
+vad_model_path = "models/silero_vad.onnx"
+default_min_silence_ms = 400
+default_max_segment_ms = 30000
+max_input_buffer_sec = 30
+"#;
+    let cfg: AppConfig = toml::from_str(text).unwrap();
+
+    assert_eq!(cfg.streaming.unwrap().partial_silence_ms, 0);
+}
+
+#[test]
 fn rejects_unknown_model_type_during_deserialization() {
     let text = r#"
 [server]
