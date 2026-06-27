@@ -12,6 +12,8 @@ pub struct AppConfig {
     pub queue: QueueConfig,
     pub logging: LoggingConfig,
     #[serde(default)]
+    pub streaming: Option<StreamingConfig>,
+    #[serde(default)]
     pub models: Vec<ModelConfig>,
 }
 
@@ -38,6 +40,16 @@ pub struct LoggingConfig {
     pub directory: PathBuf,
     pub max_file_size_mb: u64,
     pub max_files: usize,
+}
+
+/// Optional low-latency streaming ASR settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamingConfig {
+    pub enabled: bool,
+    pub vad_model_path: PathBuf,
+    pub default_min_silence_ms: u64,
+    pub default_max_segment_ms: u64,
+    pub max_input_buffer_sec: u64,
 }
 
 /// One configured OpenAI-compatible model endpoint.
@@ -118,6 +130,9 @@ impl AppConfig {
         ) {
             bail!("logging.level must be one of trace, debug, info, warn, error");
         }
+        if let Some(streaming) = &self.streaming {
+            validate_streaming(streaming)?;
+        }
         let mut model_ids = HashSet::new();
         for model in &self.models {
             validate_model(model)?;
@@ -128,6 +143,23 @@ impl AppConfig {
 
         Ok(())
     }
+}
+
+fn validate_streaming(streaming: &StreamingConfig) -> Result<()> {
+    if streaming.vad_model_path.as_os_str().is_empty() {
+        bail!("streaming.vad_model_path must not be empty");
+    }
+    if streaming.default_min_silence_ms == 0 {
+        bail!("streaming.default_min_silence_ms must be greater than 0");
+    }
+    if streaming.default_max_segment_ms == 0 {
+        bail!("streaming.default_max_segment_ms must be greater than 0");
+    }
+    if streaming.max_input_buffer_sec == 0 {
+        bail!("streaming.max_input_buffer_sec must be greater than 0");
+    }
+
+    Ok(())
 }
 
 fn validate_model(model: &ModelConfig) -> Result<()> {
