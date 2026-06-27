@@ -127,6 +127,34 @@ NPU — однопользовательский ресурс, поэтому а
 не дублируются; `speech_started`/`speech_stopped` обрамляют каждую фразу. Одна
 VAD-фраза = один Realtime-«item».
 
+## Партиалы (`delta`) — Phase 2, в реализации
+
+> Контракт зафиксирован (взят из OpenAI Realtime); реализация ведётся в ветке
+> `phase2-streaming-delta` по плану
+> `docs/superpowers/plans/2026-06-27-streaming-delta-partials.md`. До мерджа в
+> `main` сервер партиалы **не** эмитит.
+
+`conversation.item.input_audio_transcription.delta` — промежуточный результат
+фразы по микропаузе VAD:
+
+```json
+{
+  "type": "conversation.item.input_audio_transcription.delta",
+  "item_id": "item_0",
+  "content_index": 0,
+  "delta": "Запиши"
+}
+```
+
+- Семантика **append-only**: `delta` содержит только новый текст, дописываемый к
+  ранее полученному для того же `item_id`. Авторитетный текст — в `...completed`.
+- Включается `streaming.partial_silence_ms > 0` (порог микропаузы, `< min_silence_ms`);
+  `0` (по умолчанию) — партиалы выключены.
+- Каждый партиал — полный прогон Whisper на NPU (нет инкрементального декодинга
+  на статическом пайплайне); очередь сериализует, порядок `delta` перед
+  `completed` сохранён.
+- В Phase 2 в `...completed` добавляется поле `content_index: 0` (паритет с OpenAI).
+
 ## Коды ошибок
 
 `openvino_unavailable`, `npu_unavailable`, `model_not_found`, `model_load_failed`,
