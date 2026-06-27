@@ -47,6 +47,7 @@ cmd /c "`"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7
 
 ```powershell
 $env:AI2NPU_RUN_NPU_TESTS = "1"
+$env:AI2NPU_SMOKE_WAV = "C:\path\to\16bit-pcm.wav"
 cmd /c "`"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat`" -arch=x64 -host_arch=x64 && rustup run stable-x86_64-pc-windows-msvc cargo test"
 ```
 
@@ -89,11 +90,11 @@ Installer собирается через Inno Setup:
 Автоматический release запускается при push тега вида `vMAJOR.MINOR.PATCH`, например:
 
 ```powershell
-git tag -a v1.0.1 -m "ai2npu v1.0.1"
-git push origin v1.0.1
+git tag -a v1.2.0 -m "ai2npu v1.2.0"
+git push origin v1.2.0
 ```
 
-Перед созданием тега обновите версию в `Cargo.toml` и `packaging/ai2npu.iss`. Workflow проверяет совпадение версии с тегом, собирает release binary, native bridge, installer, считает SHA256 и публикует GitHub Release с `ai2npu-setup-<version>.exe`.
+Перед созданием тега обновите версию в `Cargo.toml`, `Cargo.lock` и `packaging/ai2npu.iss`. Workflow проверяет совпадение версии с тегом, собирает release binary, native bridge, installer, считает SHA256 и публикует GitHub Release с `ai2npu-setup-<version>.exe`.
 
 ## Модели и синхронизация
 

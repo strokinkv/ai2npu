@@ -47,6 +47,7 @@ Live NPU checks are opt-in:
 
 ```powershell
 $env:AI2NPU_RUN_NPU_TESTS = "1"
+$env:AI2NPU_SMOKE_WAV = "C:\path\to\16bit-pcm.wav"
 cmd /c "`"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat`" -arch=x64 -host_arch=x64 && rustup run stable-x86_64-pc-windows-msvc cargo test"
 ```
 
@@ -89,11 +90,11 @@ The output is written to `dist\ai2npu-setup-<version>.exe`.
 The automated release runs when pushing a `vMAJOR.MINOR.PATCH` tag, for example:
 
 ```powershell
-git tag -a v1.0.1 -m "ai2npu v1.0.1"
-git push origin v1.0.1
+git tag -a v1.2.0 -m "ai2npu v1.2.0"
+git push origin v1.2.0
 ```
 
-Before creating the tag, update the version in `Cargo.toml` and `packaging/ai2npu.iss`. The workflow verifies that the version matches the tag, builds the release binary, native bridge, installer, computes SHA256, and publishes a GitHub Release with `ai2npu-setup-<version>.exe`.
+Before creating the tag, update the version in `Cargo.toml`, `Cargo.lock`, and `packaging/ai2npu.iss`. The workflow verifies that the version matches the tag, builds the release binary, native bridge, installer, computes SHA256, and publishes a GitHub Release with `ai2npu-setup-<version>.exe`.
 
 ## Models and Synchronization
 

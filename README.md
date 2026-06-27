@@ -27,7 +27,7 @@ C:\ProgramData\ai2npu\models\OpenVINO\whisper-large-v3-turbo-int8-ov
 
 ## Установка и проверка
 
-Готовый installer публикуется в GitHub Releases как `ai2npu-setup-<version>.exe`. Для версии `1.0.1` ожидаемый файл: `ai2npu-setup-1.0.1.exe`.
+Готовый installer публикуется в GitHub Releases как `ai2npu-setup-<version>.exe`. Для версии `1.2.0` ожидаемый файл: `ai2npu-setup-1.2.0.exe`.
 
 После установки проверьте службу:
 
