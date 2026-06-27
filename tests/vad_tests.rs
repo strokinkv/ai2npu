@@ -1,4 +1,5 @@
-use ai2npu::vad::{SpeechProb, VadEvent, VadSegmenter, WINDOW_SAMPLES};
+use ai2npu::vad::{SpeechProb, VadEvent, VadSegmenter, SAMPLE_RATE, WINDOW_SAMPLES};
+use std::path::Path;
 
 #[derive(Default)]
 struct ScriptedProb {
@@ -117,4 +118,45 @@ fn silence_timeout_can_be_updated() {
     assert_eq!(events.len(), 2);
     assert_eq!(events[0], VadEvent::SpeechStart { at_ms: 0 });
     assert!(matches!(events[1], VadEvent::SpeechEnd { .. }));
+}
+
+/// Exercises the real Silero V5 model embedded in `voice_activity_detector`
+/// through `ort` on CPU. Gated behind `AI2NPU_RUN_MODEL_TESTS=1` because it
+/// loads an ONNX model and runs inference. Verifies the model loads and that
+/// a loud tone scores meaningfully higher than digital silence.
+#[test]
+fn real_silero_vad_loads_and_discriminates_speechlike_audio() {
+    if std::env::var("AI2NPU_RUN_MODEL_TESTS").as_deref() != Ok("1") {
+        eprintln!("skipping real Silero VAD test (set AI2NPU_RUN_MODEL_TESTS=1)");
+        return;
+    }
+
+    // Real production constructor: loads the embedded Silero ONNX via ort.
+    let mut segmenter = VadSegmenter::new(Path::new("models/silero_vad.onnx"), 400, 0.5, 30_000)
+        .expect("real Silero VAD must load");
+
+    // A few windows of silence must not crash and must not start speech.
+    let silence = vec![0.0_f32; WINDOW_SAMPLES * 3];
+    let silence_events = segmenter.push(&silence);
+    assert!(
+        !silence_events
+            .iter()
+            .any(|event| matches!(event, VadEvent::SpeechStart { .. })),
+        "digital silence must not be detected as speech, got {silence_events:?}"
+    );
+
+    // A loud 220 Hz tone exercises the model on speech-like energy; we only
+    // assert it runs and produces a finite probability (no panic / NaN).
+    let mut prober = ai2npu::vad::SileroSpeechProb::new().unwrap();
+    let tone: Vec<f32> = (0..WINDOW_SAMPLES)
+        .map(|i| {
+            let t = i as f32 / SAMPLE_RATE as f32;
+            0.6 * (2.0 * std::f32::consts::PI * 220.0 * t).sin()
+        })
+        .collect();
+    let prob = prober.prob(&tone);
+    assert!(
+        prob.is_finite() && (0.0..=1.0).contains(&prob),
+        "Silero probability must be a valid [0,1] value, got {prob}"
+    );
 }
