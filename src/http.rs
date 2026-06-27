@@ -1,14 +1,18 @@
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::extract::{Json as JsonExtractor, Multipart, Query, Request, State};
+use axum::body::{to_bytes, Body};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{DefaultBodyLimit, Json as JsonExtractor, Multipart, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -16,7 +20,7 @@ use crate::audio::{
     decode_wav, is_effectively_empty_samples, segments_to_srt, segments_to_vtt, AudioEndpoint,
     AudioJsonResponse, AudioMultipartRequest, AudioOutput, AudioResponseFormat,
 };
-use crate::config::{AppConfig, ModelType};
+use crate::config::{AppConfig, ModelConfig, ModelType};
 use crate::embeddings::{
     normalize_input, EmbeddingData, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage,
 };
@@ -28,6 +32,13 @@ use crate::inference::{
 use crate::logs::tail_log_file;
 use crate::openvino_backend::OpenVinoStatus;
 use crate::queue::{InferenceJob, InferenceOutput, InferenceQueue, QueueError};
+use crate::streaming::{
+    run_session, ClientEvent, ServerEvent, SessionConfig, SessionGuard, SessionInput,
+    StreamingErrorBody, StreamingVad,
+};
+use crate::vad::VadSegmenter;
+
+pub type StreamingVadFactory = Arc<dyn Fn() -> anyhow::Result<Box<dyn StreamingVad>> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -37,6 +48,9 @@ pub struct AppState {
     audio_executor: Arc<dyn AudioExecutor>,
     queue: InferenceQueue,
     current_request: Arc<Mutex<Option<String>>>,
+    pub(crate) streaming_session: Arc<Mutex<Option<u64>>>,
+    streaming_next_session_id: Arc<AtomicU64>,
+    streaming_vad_factory: StreamingVadFactory,
     started_at: Instant,
 }
 
@@ -46,11 +60,25 @@ pub fn build_router_with_executors(
     embedding_executor: Arc<dyn EmbeddingExecutor>,
     audio_executor: Arc<dyn AudioExecutor>,
 ) -> Router {
+    let streaming_vad_factory = default_streaming_vad_factory(&config);
+    build_router_with_streaming_vad_factory(
+        config,
+        openvino,
+        embedding_executor,
+        audio_executor,
+        streaming_vad_factory,
+    )
+}
+
+pub fn build_router_with_streaming_vad_factory(
+    config: AppConfig,
+    openvino: OpenVinoStatus,
+    embedding_executor: Arc<dyn EmbeddingExecutor>,
+    audio_executor: Arc<dyn AudioExecutor>,
+    streaming_vad_factory: StreamingVadFactory,
+) -> Router {
     let max_pending_requests = config.queue.max_pending_requests;
-    let request_body_limit_bytes = config
-        .server
-        .request_body_limit_mb
-        .saturating_mul(1024 * 1024);
+    let request_body_limit_bytes = request_body_limit_bytes(&config);
     let state = AppState {
         config: Arc::new(config),
         openvino,
@@ -58,6 +86,9 @@ pub fn build_router_with_executors(
         audio_executor,
         queue: InferenceQueue::new(max_pending_requests),
         current_request: Arc::new(Mutex::new(None)),
+        streaming_session: Arc::new(Mutex::new(None)),
+        streaming_next_session_id: Arc::new(AtomicU64::new(1)),
+        streaming_vad_factory,
         started_at: Instant::now(),
     };
 
@@ -66,6 +97,7 @@ pub fn build_router_with_executors(
         .route("/v1/embeddings", post(create_embeddings))
         .route("/v1/audio/transcriptions", post(create_transcription))
         .route("/v1/audio/translations", post(create_translation))
+        .route("/v1/realtime", get(realtime_ws))
         .route("/admin/models/unload", post(unload_models))
         .route("/health", get(health))
         .route("/logs", get(logs))
@@ -74,7 +106,32 @@ pub fn build_router_with_executors(
             request_body_limit_bytes,
             enforce_body_limit,
         ))
+        .layer(DefaultBodyLimit::max(
+            usize::try_from(request_body_limit_bytes).unwrap_or(usize::MAX),
+        ))
         .with_state(state)
+}
+
+fn default_streaming_vad_factory(config: &AppConfig) -> StreamingVadFactory {
+    let streaming = config.streaming.clone();
+    Arc::new(move || {
+        let streaming = streaming
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("streaming is not configured"))?;
+        Ok(Box::new(VadSegmenter::new(
+            &streaming.vad_model_path,
+            streaming.default_min_silence_ms,
+            0.5,
+            streaming.default_max_segment_ms,
+        )?))
+    })
+}
+
+fn request_body_limit_bytes(config: &AppConfig) -> u64 {
+    config
+        .server
+        .request_body_limit_mb
+        .saturating_mul(1024 * 1024)
 }
 
 async fn enforce_body_limit(
@@ -96,7 +153,214 @@ async fn enforce_body_limit(
         }
     }
 
+    let limit = usize::try_from(limit_bytes).unwrap_or(usize::MAX);
+    let (parts, body) = request.into_parts();
+    let body_bytes = match to_bytes(body, limit).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return ApiError::payload_too_large(format!(
+                "request body exceeds configured limit of {limit_bytes} bytes"
+            ))
+            .into_response();
+        }
+    };
+    let request = Request::from_parts(parts, Body::from(body_bytes));
+
     next.run(request).await
+}
+
+async fn realtime_ws(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move |socket| handle_realtime_socket(socket, state))
+}
+
+async fn handle_realtime_socket(mut socket: WebSocket, state: AppState) {
+    let session_id = state
+        .streaming_next_session_id
+        .fetch_add(1, Ordering::SeqCst);
+    let guard = match SessionGuard::try_acquire(Arc::clone(&state.streaming_session), session_id) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = send_ws_event(&mut socket, error.into_server_event()).await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
+
+    let Some(streaming) = state
+        .config
+        .streaming
+        .as_ref()
+        .filter(|streaming| streaming.enabled)
+        .cloned()
+    else {
+        let _ = send_ws_event(
+            &mut socket,
+            streaming_error("invalid_request", "streaming is not enabled"),
+        )
+        .await;
+        return;
+    };
+    if let Some(error) = streaming_npu_error(&state.openvino) {
+        let _ = send_ws_event(&mut socket, error).await;
+        return;
+    }
+    let Some(model) = default_streaming_model(&state.config) else {
+        let _ = send_ws_event(
+            &mut socket,
+            streaming_error("model_not_found", "no enabled whisper model is configured"),
+        )
+        .await;
+        return;
+    };
+    let vad = match (state.streaming_vad_factory)() {
+        Ok(vad) => vad,
+        Err(error) => {
+            let _ = send_ws_event(
+                &mut socket,
+                streaming_error(
+                    "model_load_failed",
+                    format!("failed to initialize VAD: {error}"),
+                ),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel(64);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(64);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let session = tokio::spawn(run_session(
+        SessionConfig {
+            session_id,
+            input_sample_rate: 24_000,
+            input_channels: 1,
+            max_input_buffer_sec: streaming.max_input_buffer_sec,
+            language: None,
+            prompt: None,
+            word_timestamps: false,
+            vad,
+            cancel: Arc::clone(&cancel),
+        },
+        input_rx,
+        event_tx.clone(),
+        Arc::clone(&state.audio_executor),
+        state.queue.clone(),
+        model,
+    ));
+
+    // Split the socket so reads and writes run as independent loops. A single
+    // `select!` arm that both reads the socket (forwarding to `input_tx`) and
+    // drains `event_rx` head-of-line-blocks itself: while a slow NPU decode
+    // keeps `run_session` from draining `input_rx`, a fast client fills
+    // `input_tx`, the read arm parks inside `input_tx.send().await`, the event
+    // arm never runs, and `run_session` then blocks on `event_tx.send()` — a
+    // deadlock that tears down the socket mid-phrase. Separate tasks let either
+    // channel back-pressure without stalling the other.
+    let (mut sink, mut stream) = socket.split();
+    let read_event_tx = event_tx.clone();
+
+    let writer = async {
+        while let Some(event) = event_rx.recv().await {
+            let text = serde_json::to_string(&event).expect("server event should serialize");
+            if sink.send(Message::Text(text)).await.is_err() {
+                break;
+            }
+        }
+    };
+    let reader = async {
+        while let Some(message) = stream.next().await {
+            let Ok(message) = message else {
+                break;
+            };
+            if !handle_ws_message(message, &input_tx, &read_event_tx).await {
+                break;
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = reader => {}
+        _ = writer => {}
+    }
+
+    // Cooperative cancel: stop the orchestrator from decoding further buffered
+    // segments once the socket is gone, then drain the in-flight decode and
+    // release the single-session guard (Task 1.7 / spec §9).
+    cancel.store(true, Ordering::SeqCst);
+    drop(input_tx);
+    drop(event_tx);
+    let _ = session.await;
+    drop(guard);
+}
+
+async fn handle_ws_message(
+    message: Message,
+    input_tx: &tokio::sync::mpsc::Sender<SessionInput>,
+    event_tx: &tokio::sync::mpsc::Sender<ServerEvent>,
+) -> bool {
+    match message {
+        Message::Text(text) => match serde_json::from_str::<ClientEvent>(&text) {
+            Ok(event) => input_tx
+                .send(SessionInput::ClientEvent(event))
+                .await
+                .is_ok(),
+            Err(error) => event_tx
+                .send(streaming_error(
+                    "invalid_request",
+                    format!("invalid client event: {error}"),
+                ))
+                .await
+                .is_ok(),
+        },
+        Message::Close(_) => false,
+        Message::Binary(_) => event_tx
+            .send(streaming_error(
+                "invalid_request",
+                "binary websocket frames are not supported",
+            ))
+            .await
+            .is_ok(),
+        Message::Ping(_) | Message::Pong(_) => true,
+    }
+}
+
+async fn send_ws_event(socket: &mut WebSocket, event: ServerEvent) -> Result<(), axum::Error> {
+    let text = serde_json::to_string(&event).expect("server event should serialize");
+    socket.send(Message::Text(text)).await
+}
+
+fn default_streaming_model(config: &AppConfig) -> Option<ModelConfig> {
+    config
+        .models
+        .iter()
+        .find(|model| model.enabled && model.model_type == ModelType::Whisper)
+        .cloned()
+}
+
+fn streaming_npu_error(openvino: &OpenVinoStatus) -> Option<ServerEvent> {
+    if !openvino.runtime_available {
+        return Some(streaming_error(
+            "openvino_unavailable",
+            "OpenVINO runtime is not available",
+        ));
+    }
+    if !openvino.npu_available {
+        return Some(streaming_error(
+            "npu_unavailable",
+            "NPU device is not available",
+        ));
+    }
+    None
+}
+
+fn streaming_error(code: impl Into<String>, message: impl Into<String>) -> ServerEvent {
+    ServerEvent::Error {
+        error: StreamingErrorBody {
+            code: code.into(),
+            message: message.into(),
+        },
+    }
 }
 
 pub fn preload_models(
@@ -177,6 +441,7 @@ async fn create_audio(
                 language: request.language.clone(),
                 duration: wav_info.duration_sec,
                 segments: Vec::new(),
+                words: Vec::new(),
             },
         ));
     }

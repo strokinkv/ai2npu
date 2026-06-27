@@ -24,6 +24,18 @@ max_file_size_mb = 10
 # Number of rotated log files to keep. Default: 10
 max_files = 10
 
+[streaming]
+# Enable the OpenAI-Realtime-compatible transcription WebSocket. Default: true
+enabled = true
+# Silero VAD model path. Default: models/silero_vad.onnx
+vad_model_path = "models/silero_vad.onnx"
+# Silence after speech before closing a segment, in ms. Default: 400
+default_min_silence_ms = 400
+# Force-cut a continuous speech segment after this many ms. Default: 30000
+default_max_segment_ms = 30000
+# Maximum buffered input audio per session, in seconds. Default: 30
+max_input_buffer_sec = 30
+
 
 [[models]]
 # OpenAI-compatible model id.

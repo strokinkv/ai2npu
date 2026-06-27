@@ -153,6 +153,7 @@ async fn get_json(path: &str) -> (StatusCode, Value) {
             language: None,
             duration: 0.0,
             segments: Vec::new(),
+            words: Vec::new(),
         })),
     );
     let response = app
@@ -179,6 +180,7 @@ async fn get_json_with_loaded_models(path: &str) -> (StatusCode, Value) {
                 language: None,
                 duration: 0.0,
                 segments: Vec::new(),
+                words: Vec::new(),
             },
             vec!["openai/whisper-large-v3-turbo".to_string()],
         )),
@@ -203,6 +205,7 @@ async fn post_embeddings_json(body: Value) -> (StatusCode, Value) {
             language: None,
             duration: 0.0,
             segments: Vec::new(),
+            words: Vec::new(),
         })),
     );
     let response = app
@@ -232,6 +235,7 @@ async fn post_embeddings_raw_with_config(config: AppConfig, body: Vec<u8>) -> (S
             language: None,
             duration: 0.0,
             segments: Vec::new(),
+            words: Vec::new(),
         })),
     );
     let response = app
@@ -311,6 +315,7 @@ async fn post_audio_multipart_raw(
             language: None,
             duration: 0.0,
             segments: Vec::new(),
+            words: Vec::new(),
         })),
     );
     let response = app
@@ -336,6 +341,96 @@ async fn post_audio_multipart_raw(
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let body = String::from_utf8(bytes.to_vec()).unwrap();
     (status, body, content_type)
+}
+
+async fn post_audio_multipart_raw_with_config(
+    config: AppConfig,
+    path: &str,
+    wav: Vec<u8>,
+    extra_fields: &[(&str, &str)],
+) -> (StatusCode, String) {
+    let boundary = "ai2npu-test-boundary";
+    let mut body = Vec::new();
+    for (name, value) in extra_fields {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
+                .as_bytes(),
+        );
+    }
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
+    body.extend_from_slice(&wav);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let app = build_router_with_executors(
+        config,
+        status_with_npu(),
+        Arc::new(StaticEmbeddingExecutor::new(vec![vec![0.1, 0.2, 0.3]])),
+        Arc::new(StaticAudioExecutor::new(AudioOutput {
+            text: String::new(),
+            language: None,
+            duration: 0.0,
+            segments: Vec::new(),
+            words: Vec::new(),
+        })),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(path)
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    (status, body)
+}
+
+async fn post_audio_raw_with_config(
+    config: AppConfig,
+    path: &str,
+    body: Vec<u8>,
+    content_type: String,
+) -> (StatusCode, String) {
+    let app = build_router_with_executors(
+        config,
+        status_with_npu(),
+        Arc::new(StaticEmbeddingExecutor::new(vec![vec![0.1, 0.2, 0.3]])),
+        Arc::new(StaticAudioExecutor::new(AudioOutput {
+            text: String::new(),
+            language: None,
+            duration: 0.0,
+            segments: Vec::new(),
+            words: Vec::new(),
+        })),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(path)
+                .header(header::CONTENT_TYPE, content_type)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    (status, body)
 }
 
 async fn post_audio_multipart(
@@ -391,6 +486,7 @@ async fn admin_unload_waits_for_active_request_and_unloads_all_models() {
             language: None,
             duration: 0.0,
             segments: Vec::new(),
+            words: Vec::new(),
         },
         vec!["openai/whisper-large-v3-turbo".to_string()],
     ));
@@ -522,6 +618,69 @@ async fn oversized_request_returns_openai_like_payload_too_large() {
 }
 
 #[tokio::test]
+async fn oversized_audio_request_without_content_length_returns_payload_too_large() {
+    let wav = wav_header(1, 16_000, 16, 1, 1_048_576);
+    let (status, body) = post_audio_multipart_raw_with_config(
+        example_config_with_body_limit(1),
+        "/v1/audio/transcriptions",
+        wav,
+        &[("model", "openai/whisper-large-v3-turbo")],
+    )
+    .await;
+    let json: Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["code"], "payload_too_large");
+}
+
+#[tokio::test]
+async fn oversized_audio_framing_without_content_length_returns_payload_too_large() {
+    let boundary = "ai2npu-test-boundary";
+    let wav = wav_header(1, 16_000, 16, 1, 1_048_500);
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nopenai/whisper-large-v3-turbo\r\n").as_bytes(),
+    );
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
+    body.extend_from_slice(&wav);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let (status, body) = post_audio_raw_with_config(
+        example_config_with_body_limit(1),
+        "/v1/audio/transcriptions",
+        body,
+        format!("multipart/form-data; boundary={boundary}"),
+    )
+    .await;
+    let json: Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["code"], "payload_too_large");
+}
+
+#[tokio::test]
+async fn audio_request_over_axum_default_but_under_configured_limit_is_allowed() {
+    let wav = wav_header(1, 16_000, 16, 1, 3_000_000);
+    let (status, json) = post_audio_multipart(
+        "/v1/audio/transcriptions",
+        wav,
+        &[
+            ("model", "openai/whisper-large-v3-turbo"),
+            ("response_format", "json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["text"], "");
+}
+
+#[tokio::test]
 async fn audio_rejects_invalid_wav_with_stable_error_code() {
     let wav = wav_header(2, 16_000, 16, 1, 64_000);
 
@@ -567,6 +726,7 @@ async fn audio_transcription_suppresses_silence_hallucination() {
             language: None,
             duration: 1.0,
             segments: Vec::new(),
+            words: Vec::new(),
         })),
     );
     let boundary = "ai2npu-test-boundary";

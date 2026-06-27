@@ -6,13 +6,14 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1"
-axum = { version = "0.7", features = ["multipart"] }
+axum = { version = "0.7", features = ["multipart", "ws"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 tokenizers = "0.22"
 base64 = "0.22"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 libloading = "0.8"
 hex = "0.4"
 sha2 = "0.10"
@@ -23,11 +24,19 @@ tower-http = { version = "0.6", features = ["limit"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+rubato = "0.16"
+# ONNX Runtime is loaded dynamically at runtime (static linking is impossible:
+# esaxx-rs/tokenizers force static CRT /MT while pyke's prebuilt ORT is /MD).
+# The required ORT 1.22.x onnxruntime.dll must be shipped next to ai2npu.exe so
+# it wins the Windows DLL search over an incompatible System32 onnxruntime.dll.
+voice_activity_detector = { version = "0.2.1", features = ["load-dynamic"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
 
 [dev-dependencies]
+futures-util = "0.3"
 http-body-util = "0.1"
 tempfile = "3"
+tokio-tungstenite = "0.24"
 tower = { version = "0.5", features = ["util"] }

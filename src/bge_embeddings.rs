@@ -70,9 +70,13 @@ impl EmbeddingExecutor for BgeEmbeddingExecutor {
     fn embed(&self, model: &ModelConfig, input: &[String]) -> Result<Vec<Vec<f32>>> {
         let (compiled, tokenizer) = self.load(model).map_err(ModelLoadFailed)?;
         let mut embeddings = Vec::with_capacity(input.len());
+        let mut truncated_inputs = 0usize;
 
         for text in input {
             let encoded = tokenizer.encode(text).map_err(InferenceFailed)?;
+            if encoded.truncated {
+                truncated_inputs += 1;
+            }
             let mut embedding = compiled
                 .infer_i64_inputs_to_f32_output(
                     &[
@@ -88,6 +92,15 @@ impl EmbeddingExecutor for BgeEmbeddingExecutor {
                 normalize_l2(&mut embedding);
             }
             embeddings.push(embedding);
+        }
+
+        if truncated_inputs > 0 {
+            tracing::warn!(
+                model = %model.id,
+                truncated_inputs,
+                max_tokens = crate::bge_tokenizer::MAX_TOKENS,
+                "embedding input truncated to the model's static token limit"
+            );
         }
 
         Ok(embeddings)

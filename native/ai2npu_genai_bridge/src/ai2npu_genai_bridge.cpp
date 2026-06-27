@@ -216,9 +216,15 @@ extern "C" AI2NPU_BRIDGE_API int ai2npu_whisper_transcribe(
             }
             config.language = token;
         }
-        if (prompt != nullptr && prompt[0] != '\0') {
-            config.initial_prompt = prompt;
-        }
+        // NOTE: `initial_prompt` is deliberately NOT forwarded on NPU. The
+        // static-shape NPU Whisper pipeline hangs inside `generate()` when an
+        // initial/context prompt is supplied (the decoder cannot grow its
+        // cross-attention prefix), so a second streaming phrase — conditioned on
+        // the first phrase's transcript — would never return. Like
+        // `word_timestamps` above, this is a hard NPU limitation neutralised at
+        // the device boundary. `prompt` is accepted for ABI/source compatibility
+        // but intentionally ignored.
+        (void)prompt;
 
         trace("starting WhisperPipeline::generate");
         auto result = handle->pipeline->generate(raw_speech, config);

@@ -71,3 +71,38 @@ async fn returns_queue_timeout_when_waiting_too_long() {
 
     assert!(matches!(second, Err(QueueError::Timeout)));
 }
+
+#[tokio::test]
+async fn pending_len_counts_running_job() {
+    let queue = InferenceQueue::new(4);
+    let observed_queue = queue.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+    let handle = tokio::spawn(async move {
+        queue
+            .submit(InferenceJob::new(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(InferenceOutput::ModelsUnloaded(0))
+            }))
+            .await
+    });
+
+    let started =
+        tokio::task::spawn_blocking(move || started_rx.recv_timeout(Duration::from_secs(1)))
+            .await
+            .unwrap();
+    if let Err(error) = started {
+        let _ = release_tx.send(());
+        panic!("job did not start within timeout: {error}");
+    }
+    let pending_len_while_running = observed_queue.pending_len();
+
+    release_tx.send(()).unwrap();
+    let result = handle.await.unwrap().unwrap();
+
+    assert_eq!(result, InferenceOutput::ModelsUnloaded(0));
+    assert_eq!(pending_len_while_running, 1);
+    assert_eq!(observed_queue.pending_len(), 0);
+}

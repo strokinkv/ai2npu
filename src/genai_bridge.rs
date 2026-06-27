@@ -195,10 +195,9 @@ fn optional_cstring(value: Option<&str>) -> Result<Option<CString>> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     static FREE_CALLS: AtomicUsize = AtomicUsize::new(0);
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     unsafe extern "C" fn create_stub(
         _model_dir: *const c_char,
@@ -242,8 +241,6 @@ mod tests {
 
     #[test]
     fn drop_frees_native_whisper_handle_by_default() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("AI2NPU_FREE_NATIVE_WHISPER_ON_DROP");
         FREE_CALLS.store(0, Ordering::SeqCst);
 
         drop(GenAiWhisperSession {
