@@ -1,18 +1,27 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ai2npu::audio::AudioOutput;
-use ai2npu::config::{ModelConfig, ModelType};
-use ai2npu::inference::{AudioExecutor, AudioInferenceOptions};
+use ai2npu::config::{AppConfig, ModelConfig, ModelType};
+use ai2npu::http::build_router_with_streaming_vad_factory;
+use ai2npu::inference::{AudioExecutor, AudioInferenceOptions, EmbeddingExecutor};
+use ai2npu::openvino_backend::OpenVinoStatus;
 use ai2npu::queue::InferenceQueue;
 use ai2npu::streaming::{
-    run_session, ClientEvent, ServerEvent, SessionConfig, SessionGuard, SessionInput,
+    run_session, ClientEvent, ServerEvent, SessionConfig, SessionGuard, SessionInput, StreamingVad,
 };
 use ai2npu::vad::{SpeechProb, VadSegmenter, WINDOW_SAMPLES};
 use anyhow::{bail, Result};
+use axum::Router;
 use base64::{engine::general_purpose, Engine as _};
+use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{connect_async, WebSocketStream};
 
 #[test]
 fn deserializes_realtime_transcription_session_update() {
@@ -156,6 +165,15 @@ impl AudioExecutor for ScriptedAudioExecutor {
     }
 }
 
+#[derive(Debug)]
+struct NoopEmbeddingExecutor;
+
+impl EmbeddingExecutor for NoopEmbeddingExecutor {
+    fn embed(&self, _model: &ModelConfig, input: &[String]) -> Result<Vec<Vec<f32>>> {
+        Ok(vec![vec![0.0]; input.len()])
+    }
+}
+
 fn pcm16_base64_for_windows(windows: usize) -> String {
     let samples = windows * WINDOW_SAMPLES;
     let mut pcm = Vec::with_capacity(samples * 2);
@@ -178,6 +196,72 @@ fn whisper_model() -> ModelConfig {
     }
 }
 
+fn example_config() -> AppConfig {
+    let text = std::fs::read_to_string("config.example.toml").unwrap();
+    toml::from_str(&text).unwrap()
+}
+
+fn status_with_npu() -> OpenVinoStatus {
+    OpenVinoStatus {
+        runtime_available: true,
+        devices: vec!["CPU".to_string(), "GPU".to_string(), "NPU".to_string()],
+        npu_available: true,
+        error: None,
+    }
+}
+
+async fn spawn_test_server(app: Router) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("ws://{addr}/v1/realtime"), server)
+}
+
+async fn next_ws_json<S>(socket: &mut WebSocketStream<S>) -> serde_json::Value
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("timed out waiting for websocket event")
+        .expect("websocket closed")
+        .expect("websocket error");
+    let Message::Text(text) = message else {
+        panic!("expected text websocket frame, got {message:?}");
+    };
+    serde_json::from_str(&text).unwrap()
+}
+
+fn streaming_test_app(
+    executor: Arc<ScriptedAudioExecutor>,
+    vad_scripts: impl IntoIterator<Item = Vec<f32>>,
+) -> Router {
+    let scripts = Arc::new(Mutex::new(vad_scripts.into_iter().collect::<VecDeque<_>>()));
+    let vad_factory = {
+        let scripts = Arc::clone(&scripts);
+        Arc::new(move || -> Result<Box<dyn StreamingVad>> {
+            let probs = scripts.lock().unwrap().pop_front().unwrap_or_default();
+            let vad = VadSegmenter::with_probability_source(
+                ScriptedSpeechProb::new(probs),
+                64,
+                0.5,
+                30_000,
+            )?;
+            Ok(Box::new(vad))
+        })
+    };
+
+    build_router_with_streaming_vad_factory(
+        example_config(),
+        status_with_npu(),
+        Arc::new(NoopEmbeddingExecutor),
+        executor,
+        vad_factory,
+    )
+}
+
 #[tokio::test]
 async fn run_session_emits_ordered_finals() {
     let vad = VadSegmenter::with_probability_source(
@@ -195,7 +279,7 @@ async fn run_session_emits_ordered_finals() {
         language: None,
         prompt: None,
         word_timestamps: false,
-        vad,
+        vad: Box::new(vad),
     };
     let executor = Arc::new(ScriptedAudioExecutor::new(["Запиши", "сообщение"]));
     let (input_tx, input_rx) = tokio::sync::mpsc::channel(8);
@@ -299,4 +383,127 @@ async fn run_session_emits_ordered_finals() {
             .is_some_and(|prompt| prompt.contains("Команды: Запиши") && prompt.contains("Запиши")),
         "second prompt should include session prompt and previous transcript, got {prompts:?}"
     );
+}
+
+#[tokio::test]
+async fn ws_roundtrip_streams_realtime_events_and_rejects_busy_session() {
+    let executor = Arc::new(ScriptedAudioExecutor::new(["Запиши", "сообщение"]));
+    let app = streaming_test_app(
+        Arc::clone(&executor),
+        [vec![0.9, 0.9, 0.0, 0.0, 0.9, 0.9, 0.0, 0.0]],
+    );
+    let (url, server) = spawn_test_server(app).await;
+
+    let (mut socket, _) = connect_async(&url).await.unwrap();
+    assert_eq!(
+        next_ws_json(&mut socket).await,
+        json!({
+            "type": "transcription_session.created",
+            "session_id": 1
+        })
+    );
+
+    let (mut busy_socket, _) = connect_async(&url).await.unwrap();
+    let busy = next_ws_json(&mut busy_socket).await;
+    assert_eq!(busy["type"], "error");
+    assert_eq!(busy["error"]["code"], "streaming_busy");
+    let _ = busy_socket.close(None).await;
+
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "transcription_session.update",
+                "session": {
+                    "input_audio_format": "pcm16",
+                    "input_audio_transcription": {
+                        "model": "openai/whisper-large-v3-turbo",
+                        "language": "ru",
+                        "prompt": "Команды: Запиши"
+                    },
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "silence_duration_ms": 64
+                    },
+                    "sample_rate": 16000,
+                    "word_timestamps": false
+                }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "input_audio_buffer.append",
+                "audio": pcm16_base64_for_windows(8)
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let mut events = Vec::new();
+    for _ in 0..9 {
+        events.push(next_ws_json(&mut socket).await);
+    }
+
+    assert_eq!(
+        events,
+        vec![
+            json!({"type": "transcription_session.updated"}),
+            json!({
+                "type": "input_audio_buffer.speech_started",
+                "audio_start_ms": 0,
+                "item_id": "item_0"
+            }),
+            json!({
+                "type": "input_audio_buffer.speech_stopped",
+                "audio_end_ms": 64,
+                "item_id": "item_0"
+            }),
+            json!({
+                "type": "input_audio_buffer.committed",
+                "item_id": "item_0"
+            }),
+            json!({
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_0",
+                "transcript": "Запиши"
+            }),
+            json!({
+                "type": "input_audio_buffer.speech_started",
+                "audio_start_ms": 128,
+                "item_id": "item_1"
+            }),
+            json!({
+                "type": "input_audio_buffer.speech_stopped",
+                "audio_end_ms": 192,
+                "item_id": "item_1"
+            }),
+            json!({
+                "type": "input_audio_buffer.committed",
+                "item_id": "item_1"
+            }),
+            json!({
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_1",
+                "transcript": "сообщение"
+            }),
+        ]
+    );
+
+    let prompts = executor.prompts();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[0].as_deref(), Some("Команды: Запиши"));
+    assert!(
+        prompts[1]
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("Команды: Запиши") && prompt.contains("Запиши")),
+        "second prompt should include session prompt and previous transcript, got {prompts:?}"
+    );
+
+    let _ = socket.close(None).await;
+    server.abort();
 }

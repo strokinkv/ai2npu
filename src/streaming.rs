@@ -11,7 +11,7 @@ use crate::config::ModelConfig;
 use crate::inference::{AudioExecutor, AudioInferenceOptions};
 use crate::queue::{InferenceJob, InferenceOutput, InferenceQueue};
 use crate::resample::resample_to_16k_mono;
-use crate::vad::{SileroSpeechProb, SpeechProb, VadEvent, VadSegmenter};
+use crate::vad::{SpeechProb, VadEvent, VadSegmenter};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "type")]
@@ -37,7 +37,30 @@ pub enum SessionInput {
     Control(ClientControl),
 }
 
-pub struct SessionConfig<P = SileroSpeechProb> {
+pub trait StreamingVad: Send {
+    fn push(&mut self, samples_16k: &[f32]) -> Vec<VadEvent>;
+    fn flush(&mut self) -> Option<VadEvent>;
+    fn set_min_silence_ms(&mut self, ms: u64);
+}
+
+impl<P> StreamingVad for VadSegmenter<P>
+where
+    P: SpeechProb + Send,
+{
+    fn push(&mut self, samples_16k: &[f32]) -> Vec<VadEvent> {
+        VadSegmenter::push(self, samples_16k)
+    }
+
+    fn flush(&mut self) -> Option<VadEvent> {
+        VadSegmenter::flush(self)
+    }
+
+    fn set_min_silence_ms(&mut self, ms: u64) {
+        VadSegmenter::set_min_silence_ms(self, ms);
+    }
+}
+
+pub struct SessionConfig {
     pub session_id: u64,
     pub input_sample_rate: u32,
     pub input_channels: u16,
@@ -45,7 +68,7 @@ pub struct SessionConfig<P = SileroSpeechProb> {
     pub language: Option<String>,
     pub prompt: Option<String>,
     pub word_timestamps: bool,
-    pub vad: VadSegmenter<P>,
+    pub vad: Box<dyn StreamingVad>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -191,7 +214,7 @@ impl Drop for SessionGuard {
     }
 }
 
-struct SessionRuntime<P> {
+struct SessionRuntime {
     session_id: u64,
     input_sample_rate: u32,
     input_channels: u16,
@@ -199,23 +222,20 @@ struct SessionRuntime<P> {
     language: Option<String>,
     prompt: Option<String>,
     word_timestamps: bool,
-    vad: VadSegmenter<P>,
+    vad: Box<dyn StreamingVad>,
     current_item_id: Option<String>,
     next_item_index: u64,
     confirmed_transcripts: Vec<String>,
 }
 
-pub async fn run_session<P>(
-    cfg: SessionConfig<P>,
+pub async fn run_session(
+    cfg: SessionConfig,
     mut audio_rx: mpsc::Receiver<SessionInput>,
     event_tx: mpsc::Sender<ServerEvent>,
     executor: Arc<dyn AudioExecutor>,
     queue: InferenceQueue,
     model: ModelConfig,
-) -> Result<()>
-where
-    P: SpeechProb + Send + 'static,
-{
+) -> Result<()> {
     let cancel = Arc::new(AtomicBool::new(false));
     let _cancel_on_drop = SessionCancelOnDrop(Arc::clone(&cancel));
     let mut runtime = SessionRuntime {
@@ -270,17 +290,14 @@ impl Drop for SessionCancelOnDrop {
     }
 }
 
-async fn handle_client_event<P>(
+async fn handle_client_event(
     event: ClientEvent,
-    runtime: &mut SessionRuntime<P>,
+    runtime: &mut SessionRuntime,
     event_tx: &mpsc::Sender<ServerEvent>,
     executor: &Arc<dyn AudioExecutor>,
     queue: &InferenceQueue,
     model: &ModelConfig,
-) -> Result<()>
-where
-    P: SpeechProb + Send + 'static,
-{
+) -> Result<()> {
     match event {
         ClientEvent::TranscriptionSessionUpdate { session } => {
             handle_control(
@@ -313,17 +330,14 @@ where
     }
 }
 
-async fn handle_control<P>(
+async fn handle_control(
     control: ClientControl,
-    runtime: &mut SessionRuntime<P>,
+    runtime: &mut SessionRuntime,
     event_tx: &mpsc::Sender<ServerEvent>,
     executor: &Arc<dyn AudioExecutor>,
     queue: &InferenceQueue,
     model: &ModelConfig,
-) -> Result<()>
-where
-    P: SpeechProb + Send + 'static,
-{
+) -> Result<()> {
     match control {
         ClientControl::Update(session) => {
             apply_session_update(session, runtime)?;
@@ -333,13 +347,10 @@ where
     }
 }
 
-fn apply_session_update<P>(
+fn apply_session_update(
     session: TranscriptionSessionConfig,
-    runtime: &mut SessionRuntime<P>,
-) -> Result<()>
-where
-    P: SpeechProb,
-{
+    runtime: &mut SessionRuntime,
+) -> Result<()> {
     if let Some(format) = session.input_audio_format {
         if format != "pcm16" {
             bail!("unsupported input_audio_format: {format}");
@@ -367,17 +378,14 @@ where
     Ok(())
 }
 
-async fn process_audio_bytes<P>(
+async fn process_audio_bytes(
     bytes: Vec<u8>,
-    runtime: &mut SessionRuntime<P>,
+    runtime: &mut SessionRuntime,
     event_tx: &mpsc::Sender<ServerEvent>,
     executor: &Arc<dyn AudioExecutor>,
     queue: &InferenceQueue,
     model: &ModelConfig,
-) -> Result<()>
-where
-    P: SpeechProb + Send + 'static,
-{
+) -> Result<()> {
     validate_input_buffer_len(&bytes, runtime)?;
     let samples = pcm_s16le_to_f32(&bytes)?;
     let samples_16k =
@@ -386,7 +394,7 @@ where
     handle_vad_events(events, runtime, event_tx, executor, queue, model).await
 }
 
-fn validate_input_buffer_len<P>(bytes: &[u8], runtime: &SessionRuntime<P>) -> Result<()> {
+fn validate_input_buffer_len(bytes: &[u8], runtime: &SessionRuntime) -> Result<()> {
     let max_bytes = u64::from(runtime.input_sample_rate)
         .checked_mul(u64::from(runtime.input_channels))
         .and_then(|samples| samples.checked_mul(2))
@@ -411,17 +419,14 @@ fn pcm_s16le_to_f32(bytes: &[u8]) -> Result<Vec<f32>> {
         .collect())
 }
 
-async fn handle_vad_events<P>(
+async fn handle_vad_events(
     events: Vec<VadEvent>,
-    runtime: &mut SessionRuntime<P>,
+    runtime: &mut SessionRuntime,
     event_tx: &mpsc::Sender<ServerEvent>,
     executor: &Arc<dyn AudioExecutor>,
     queue: &InferenceQueue,
     model: &ModelConfig,
-) -> Result<()>
-where
-    P: SpeechProb + Send + 'static,
-{
+) -> Result<()> {
     for event in events {
         match event {
             VadEvent::SpeechStart { at_ms } => {
@@ -446,34 +451,28 @@ where
     Ok(())
 }
 
-async fn flush_segment<P>(
-    runtime: &mut SessionRuntime<P>,
+async fn flush_segment(
+    runtime: &mut SessionRuntime,
     event_tx: &mpsc::Sender<ServerEvent>,
     executor: &Arc<dyn AudioExecutor>,
     queue: &InferenceQueue,
     model: &ModelConfig,
-) -> Result<()>
-where
-    P: SpeechProb + Send + 'static,
-{
+) -> Result<()> {
     if let Some(event) = runtime.vad.flush() {
         handle_vad_events(vec![event], runtime, event_tx, executor, queue, model).await?;
     }
     Ok(())
 }
 
-async fn decode_segment<P>(
+async fn decode_segment(
     samples: Vec<f32>,
     audio_end_ms: u64,
-    runtime: &mut SessionRuntime<P>,
+    runtime: &mut SessionRuntime,
     event_tx: &mpsc::Sender<ServerEvent>,
     executor: &Arc<dyn AudioExecutor>,
     queue: &InferenceQueue,
     model: &ModelConfig,
-) -> Result<()>
-where
-    P: SpeechProb + Send + 'static,
-{
+) -> Result<()> {
     let item_id = runtime
         .current_item_id
         .take()
@@ -494,7 +493,14 @@ where
     )
     .await?;
 
-    let output = transcribe_segment(samples, runtime, executor, queue, model).await?;
+    let options = AudioInferenceOptions {
+        endpoint: AudioEndpoint::Transcriptions,
+        language: runtime.language.clone(),
+        prompt: conditioned_prompt(&runtime.prompt, &runtime.confirmed_transcripts),
+        temperature: None,
+        return_timestamps: runtime.word_timestamps,
+    };
+    let output = transcribe_segment(samples, options, executor, queue, model).await?;
     let transcript = output.text;
     if !transcript.trim().is_empty() {
         runtime.confirmed_transcripts.push(transcript.clone());
@@ -511,22 +517,15 @@ where
     .await
 }
 
-async fn transcribe_segment<P>(
+async fn transcribe_segment(
     samples: Vec<f32>,
-    runtime: &SessionRuntime<P>,
+    options: AudioInferenceOptions,
     executor: &Arc<dyn AudioExecutor>,
     queue: &InferenceQueue,
     model: &ModelConfig,
 ) -> Result<AudioOutput> {
     let executor = Arc::clone(executor);
     let model = model.clone();
-    let options = AudioInferenceOptions {
-        endpoint: AudioEndpoint::Transcriptions,
-        language: runtime.language.clone(),
-        prompt: conditioned_prompt(&runtime.prompt, &runtime.confirmed_transcripts),
-        temperature: None,
-        return_timestamps: runtime.word_timestamps,
-    };
 
     let output = queue
         .submit(InferenceJob::new(move || {
@@ -559,7 +558,7 @@ fn conditioned_prompt(
     }
 }
 
-fn next_item_id<P>(runtime: &mut SessionRuntime<P>) -> String {
+fn next_item_id(runtime: &mut SessionRuntime) -> String {
     let item_id = format!("item_{}", runtime.next_item_index);
     runtime.next_item_index += 1;
     item_id
