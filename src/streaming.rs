@@ -468,6 +468,7 @@ async fn handle_vad_events(
             } => {
                 decode_segment(samples, end_ms, runtime, event_tx, executor, queue, model).await?;
             }
+            VadEvent::SpeechPartial { .. } => {}
         }
     }
     Ok(())

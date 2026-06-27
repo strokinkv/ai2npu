@@ -120,6 +120,59 @@ fn silence_timeout_can_be_updated() {
     assert!(matches!(events[1], VadEvent::SpeechEnd { .. }));
 }
 
+#[test]
+fn emits_partial_on_micro_pause_before_endpoint() {
+    // speech(2) -> short silence(1) -> speech(2) -> long silence(2)
+    // min_silence=64ms (2 windows), partial_silence=32ms (1 window).
+    let mut segmenter = VadSegmenter::with_probability_source(
+        ScriptedProb::new([0.9, 0.9, 0.2, 0.9, 0.9, 0.2, 0.2]),
+        64,
+        0.5,
+        30_000,
+    )
+    .unwrap();
+    segmenter.set_partial_silence_ms(32);
+
+    let events = segmenter.push(&samples_for_windows(7));
+
+    // SpeechStart, SpeechPartial (after the 1-window micro-pause), SpeechEnd.
+    assert_eq!(events.len(), 3, "got {events:?}");
+    assert!(matches!(events[0], VadEvent::SpeechStart { .. }));
+    match &events[1] {
+        VadEvent::SpeechPartial { samples, .. } => {
+            // Snapshot holds the 2 speech windows seen so far.
+            assert_eq!(samples.len(), 2 * WINDOW_SAMPLES);
+        }
+        other => panic!("expected SpeechPartial, got {other:?}"),
+    }
+    match &events[2] {
+        VadEvent::SpeechEnd { samples, .. } => {
+            // Final holds all 4 speech windows; partial is a strict prefix.
+            assert_eq!(samples.len(), 4 * WINDOW_SAMPLES);
+        }
+        other => panic!("expected SpeechEnd, got {other:?}"),
+    }
+}
+
+#[test]
+fn no_partial_when_disabled() {
+    let mut segmenter = VadSegmenter::with_probability_source(
+        ScriptedProb::new([0.9, 0.9, 0.2, 0.9, 0.9, 0.2, 0.2]),
+        64,
+        0.5,
+        30_000,
+    )
+    .unwrap();
+    // partial_silence_ms defaults to 0 -> disabled.
+    let events = segmenter.push(&samples_for_windows(7));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, VadEvent::SpeechPartial { .. })),
+        "no partial expected when disabled, got {events:?}"
+    );
+}
+
 /// Exercises the real Silero V5 model embedded in `voice_activity_detector`
 /// through `ort` on CPU. Gated behind `AI2NPU_RUN_MODEL_TESTS=1` because it
 /// loads an ONNX model and runs inference. Verifies the model loads and that

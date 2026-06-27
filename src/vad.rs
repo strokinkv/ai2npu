@@ -41,6 +41,11 @@ pub enum VadEvent {
     SpeechStart {
         at_ms: u64,
     },
+    SpeechPartial {
+        start_ms: u64,
+        at_ms: u64,
+        samples: Vec<f32>,
+    },
     SpeechEnd {
         start_ms: u64,
         end_ms: u64,
@@ -59,6 +64,8 @@ pub struct VadSegmenter<P = SileroSpeechProb> {
     last_speech_end_ms: u64,
     current_ms: u64,
     silence_ms: u64,
+    partial_silence_ms: u64,
+    partial_emitted_for_pause: bool,
     speech_samples: Vec<f32>,
 }
 
@@ -101,6 +108,8 @@ impl<P: SpeechProb> VadSegmenter<P> {
             last_speech_end_ms: 0,
             current_ms: 0,
             silence_ms: 0,
+            partial_silence_ms: 0,
+            partial_emitted_for_pause: false,
             speech_samples: Vec::new(),
         })
     }
@@ -131,6 +140,10 @@ impl<P: SpeechProb> VadSegmenter<P> {
         self.min_silence_ms = ms;
     }
 
+    pub fn set_partial_silence_ms(&mut self, ms: u64) {
+        self.partial_silence_ms = ms;
+    }
+
     fn process_window(&mut self, window: &[f32], events: &mut Vec<VadEvent>) {
         let is_speech = self.prob.prob(window) >= self.threshold;
 
@@ -143,8 +156,21 @@ impl<P: SpeechProb> VadSegmenter<P> {
         if is_speech {
             if !self.in_speech {
                 self.start_segment(events);
+            } else if self.partials_enabled()
+                && !self.partial_emitted_for_pause
+                && self.silence_ms >= self.partial_silence_ms
+                && self.silence_ms < self.min_silence_ms
+                && !self.speech_samples.is_empty()
+            {
+                self.partial_emitted_for_pause = true;
+                events.push(VadEvent::SpeechPartial {
+                    start_ms: self.speech_start_ms,
+                    at_ms: self.current_ms - self.silence_ms + self.partial_silence_ms,
+                    samples: self.speech_samples.clone(),
+                });
             }
             self.silence_ms = 0;
+            self.partial_emitted_for_pause = false;
             self.speech_samples.extend_from_slice(window);
             self.last_speech_end_ms = self.current_ms + WINDOW_MS;
         } else if self.in_speech {
@@ -164,11 +190,16 @@ impl<P: SpeechProb> VadSegmenter<P> {
             && self.current_ms.saturating_sub(self.speech_start_ms) >= self.max_segment_ms
     }
 
+    fn partials_enabled(&self) -> bool {
+        self.partial_silence_ms > 0 && self.partial_silence_ms < self.min_silence_ms
+    }
+
     fn start_segment(&mut self, events: &mut Vec<VadEvent>) {
         self.in_speech = true;
         self.speech_start_ms = self.current_ms;
         self.last_speech_end_ms = self.current_ms;
         self.silence_ms = 0;
+        self.partial_emitted_for_pause = false;
         self.speech_samples.clear();
         events.push(VadEvent::SpeechStart {
             at_ms: self.speech_start_ms,
