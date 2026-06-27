@@ -38,6 +38,8 @@ pub struct AppState {
     audio_executor: Arc<dyn AudioExecutor>,
     queue: InferenceQueue,
     current_request: Arc<Mutex<Option<String>>>,
+    #[allow(dead_code)]
+    pub(crate) streaming_session: Arc<Mutex<Option<u64>>>,
     started_at: Instant,
 }
 
@@ -56,6 +58,7 @@ pub fn build_router_with_executors(
         audio_executor,
         queue: InferenceQueue::new(max_pending_requests),
         current_request: Arc::new(Mutex::new(None)),
+        streaming_session: Arc::new(Mutex::new(None)),
         started_at: Instant::now(),
     };
 
