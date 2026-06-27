@@ -34,7 +34,7 @@
 - Операционная система: Windows 11.
 - Архитектура: x64.
 - Аппаратное ускорение: Intel NPU.
-- Runtime: последняя актуальная версия OpenVINO 2026.1
+- Runtime: последняя актуальная версия OpenVINO 2026.2
 - Язык реализации: Rust.
 
 ### 1.4. Основные ограничения
@@ -739,8 +739,8 @@ Whisper bundle должен быть совместим с OpenVINO GenAI `Whisp
 ### 14.2. Runtime и инференс
 
 - OpenVINO Runtime.
-- OpenVINO 2026.1.
-- Основной доступ к OpenVINO Runtime из Rust: через OpenVINO C API и тонкую Rust FFI-обёртку, если существующие Rust crates не обеспечивают стабильную поддержку OpenVINO 2026.1 и устройства `NPU`.
+- OpenVINO 2026.2.
+- Основной доступ к OpenVINO Runtime из Rust: через OpenVINO C API и тонкую Rust FFI-обёртку, если существующие Rust crates не обеспечивают стабильную поддержку OpenVINO 2026.2 и устройства `NPU`.
 - Для Whisper в первой версии используется OpenVINO GenAI `WhisperPipeline`. Если для OpenVINO GenAI нет готового Rust binding, допускается реализовать минимальную C/C++ FFI-обёртку вокруг `ov::genai::WhisperPipeline`.
 - Для embeddings используется OpenVINO Runtime: tokenization выполняется Rust tokenizer из `tokenizer.json`, inference использует `model.xml` / `model.bin`.
 - Модельный inference должен компилироваться и выполняться только на устройстве `NPU`.

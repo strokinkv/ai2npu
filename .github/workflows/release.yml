@@ -15,10 +15,10 @@ permissions:
   contents: write
 
 env:
-  OPENVINO_GENAI_VERSION: 2026.1.0.0
-  OPENVINO_GENAI_ARCHIVE_URL: https://storage.openvinotoolkit.org/repositories/openvino_genai/packages/2026.1/windows/openvino_genai_windows_2026.1.0.0_x86_64.zip
-  OPENVINO_GENAI_ARCHIVE_DIR: tools\openvino_genai_2026.1.0.0_archive
-  OPENVINO_GENAI_ROOT: tools\openvino_genai_2026.1.0.0_archive\openvino_genai_windows_2026.1.0.0_x86_64
+  OPENVINO_GENAI_VERSION: 2026.2.0.0
+  OPENVINO_GENAI_ARCHIVE_URL: https://storage.openvinotoolkit.org/repositories/openvino_genai/packages/2026.2/windows/openvino_genai_windows_2026.2.0.0_x86_64.zip
+  OPENVINO_GENAI_ARCHIVE_DIR: tools\openvino_genai_2026.2.0.0_archive
+  OPENVINO_GENAI_ROOT: tools\openvino_genai_2026.2.0.0_archive\openvino_genai_windows_2026.2.0.0_x86_64
 
 jobs:
   build-release:

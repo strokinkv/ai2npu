@@ -3,7 +3,7 @@ param(
     [string]$RustToolchain = "stable-x86_64-pc-windows-msvc",
     [string]$VsDevCmd = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat",
     [string]$DistDir = "dist\ai2npu",
-    [string]$OpenVinoGenAiRoot = "tools\openvino_genai_2026.1.0.0_archive\openvino_genai_windows_2026.1.0.0_x86_64",
+    [string]$OpenVinoGenAiRoot = "tools\openvino_genai_2026.2.0.0_archive\openvino_genai_windows_2026.2.0.0_x86_64",
     [string]$BridgeDll = "build\ai2npu_genai_bridge_archive\Release\ai2npu_genai_bridge.dll",
     [switch]$SkipCargoBuild
 )
