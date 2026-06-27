@@ -66,6 +66,7 @@ $response.data[0].embedding.Count
 - `POST /v1/embeddings` — эмбеддинги BGE-M3.
 - `POST /v1/audio/transcriptions` — транскрибация Whisper (форматы ответа: `json`, `verbose_json`, `text`, `srt`, `vtt`).
 - `POST /v1/audio/translations` — перевод аудио в английский текст.
+- `GET /v1/realtime` — WebSocket потоковой транскрибации «на лету» (подмножество OpenAI Realtime). Одна сессия одновременно; см. [docs/streaming-api.md](docs/streaming-api.md).
 - `GET /v1/models` — список включённых моделей.
 - `GET /health` — статус службы, NPU/OpenVINO, загруженные модели и очередь.
 - `GET /logs?lines=N` — последние строки лог-файла (по умолчанию 200).
@@ -86,6 +87,7 @@ $response.data[0].embedding.Count
 - [docs/installation-and-operation.md](docs/installation-and-operation.md)
 - [docs/development-setup-and-build.md](docs/development-setup-and-build.md)
 - [docs/openvino-sdk-setup.md](docs/openvino-sdk-setup.md)
+- [docs/streaming-api.md](docs/streaming-api.md) — потоковая транскрибация (WebSocket `/v1/realtime`)
 
 English version:
 - [docs/installation-and-operation.en.md](docs/installation-and-operation.en.md)
