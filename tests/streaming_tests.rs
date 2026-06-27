@@ -447,9 +447,9 @@ async fn run_session_emits_deltas_then_final() {
         events.push(event);
     }
 
-    let delta = events
+    let deltas = events
         .iter()
-        .find_map(|e| match e {
+        .filter_map(|e| match e {
             ServerEvent::InputAudioTranscriptionDelta {
                 item_id,
                 content_index,
@@ -457,10 +457,11 @@ async fn run_session_emits_deltas_then_final() {
             } => Some((item_id.clone(), *content_index, delta.clone())),
             _ => None,
         })
-        .expect("expected a delta event");
-    assert_eq!(delta.0, "item_0");
-    assert_eq!(delta.1, 0);
-    assert_eq!(delta.2, "Запиши");
+        .collect::<Vec<_>>();
+    assert_eq!(
+        deltas,
+        vec![("item_0".to_string(), 0, "Запиши".to_string())]
+    );
 
     let final_pos = events
         .iter()
