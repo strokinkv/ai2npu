@@ -1,6 +1,17 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+
+use crate::audio::{AudioEndpoint, AudioOutput};
+use crate::config::ModelConfig;
+use crate::inference::{AudioExecutor, AudioInferenceOptions};
+use crate::queue::{InferenceJob, InferenceOutput, InferenceQueue};
+use crate::resample::resample_to_16k_mono;
+use crate::vad::{SileroSpeechProb, SpeechProb, VadEvent, VadSegmenter};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "type")]
@@ -11,6 +22,30 @@ pub enum ClientEvent {
     InputAudioBufferAppend { audio: String },
     #[serde(rename = "input_audio_buffer.commit")]
     InputAudioBufferCommit,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClientControl {
+    Update(TranscriptionSessionConfig),
+    Commit,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionInput {
+    ClientEvent(ClientEvent),
+    Audio(Vec<u8>),
+    Control(ClientControl),
+}
+
+pub struct SessionConfig<P = SileroSpeechProb> {
+    pub session_id: u64,
+    pub input_sample_rate: u32,
+    pub input_channels: u16,
+    pub max_input_buffer_sec: u64,
+    pub language: Option<String>,
+    pub prompt: Option<String>,
+    pub word_timestamps: bool,
+    pub vad: VadSegmenter<P>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -154,4 +189,385 @@ impl Drop for SessionGuard {
             }
         }
     }
+}
+
+struct SessionRuntime<P> {
+    session_id: u64,
+    input_sample_rate: u32,
+    input_channels: u16,
+    max_input_buffer_sec: u64,
+    language: Option<String>,
+    prompt: Option<String>,
+    word_timestamps: bool,
+    vad: VadSegmenter<P>,
+    current_item_id: Option<String>,
+    next_item_index: u64,
+    confirmed_transcripts: Vec<String>,
+}
+
+pub async fn run_session<P>(
+    cfg: SessionConfig<P>,
+    mut audio_rx: mpsc::Receiver<SessionInput>,
+    event_tx: mpsc::Sender<ServerEvent>,
+    executor: Arc<dyn AudioExecutor>,
+    queue: InferenceQueue,
+    model: ModelConfig,
+) -> Result<()>
+where
+    P: SpeechProb + Send + 'static,
+{
+    let cancel = Arc::new(AtomicBool::new(false));
+    let _cancel_on_drop = SessionCancelOnDrop(Arc::clone(&cancel));
+    let mut runtime = SessionRuntime {
+        session_id: cfg.session_id,
+        input_sample_rate: cfg.input_sample_rate,
+        input_channels: cfg.input_channels,
+        max_input_buffer_sec: cfg.max_input_buffer_sec,
+        language: cfg.language,
+        prompt: cfg.prompt,
+        word_timestamps: cfg.word_timestamps,
+        vad: cfg.vad,
+        current_item_id: None,
+        next_item_index: 0,
+        confirmed_transcripts: Vec::new(),
+    };
+
+    send_event(
+        &event_tx,
+        ServerEvent::TranscriptionSessionCreated {
+            session_id: runtime.session_id,
+        },
+    )
+    .await?;
+
+    while let Some(input) = audio_rx.recv().await {
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        match input {
+            SessionInput::ClientEvent(event) => {
+                handle_client_event(event, &mut runtime, &event_tx, &executor, &queue, &model)
+                    .await?;
+            }
+            SessionInput::Audio(bytes) => {
+                process_audio_bytes(bytes, &mut runtime, &event_tx, &executor, &queue, &model)
+                    .await?;
+            }
+            SessionInput::Control(control) => {
+                handle_control(control, &mut runtime, &event_tx, &executor, &queue, &model).await?;
+            }
+        }
+    }
+
+    flush_segment(&mut runtime, &event_tx, &executor, &queue, &model).await
+}
+
+struct SessionCancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for SessionCancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+async fn handle_client_event<P>(
+    event: ClientEvent,
+    runtime: &mut SessionRuntime<P>,
+    event_tx: &mpsc::Sender<ServerEvent>,
+    executor: &Arc<dyn AudioExecutor>,
+    queue: &InferenceQueue,
+    model: &ModelConfig,
+) -> Result<()>
+where
+    P: SpeechProb + Send + 'static,
+{
+    match event {
+        ClientEvent::TranscriptionSessionUpdate { session } => {
+            handle_control(
+                ClientControl::Update(session),
+                runtime,
+                event_tx,
+                executor,
+                queue,
+                model,
+            )
+            .await
+        }
+        ClientEvent::InputAudioBufferAppend { audio } => {
+            let bytes = general_purpose::STANDARD
+                .decode(audio)
+                .context("invalid base64 audio")?;
+            process_audio_bytes(bytes, runtime, event_tx, executor, queue, model).await
+        }
+        ClientEvent::InputAudioBufferCommit => {
+            handle_control(
+                ClientControl::Commit,
+                runtime,
+                event_tx,
+                executor,
+                queue,
+                model,
+            )
+            .await
+        }
+    }
+}
+
+async fn handle_control<P>(
+    control: ClientControl,
+    runtime: &mut SessionRuntime<P>,
+    event_tx: &mpsc::Sender<ServerEvent>,
+    executor: &Arc<dyn AudioExecutor>,
+    queue: &InferenceQueue,
+    model: &ModelConfig,
+) -> Result<()>
+where
+    P: SpeechProb + Send + 'static,
+{
+    match control {
+        ClientControl::Update(session) => {
+            apply_session_update(session, runtime)?;
+            send_event(event_tx, ServerEvent::TranscriptionSessionUpdated).await
+        }
+        ClientControl::Commit => flush_segment(runtime, event_tx, executor, queue, model).await,
+    }
+}
+
+fn apply_session_update<P>(
+    session: TranscriptionSessionConfig,
+    runtime: &mut SessionRuntime<P>,
+) -> Result<()>
+where
+    P: SpeechProb,
+{
+    if let Some(format) = session.input_audio_format {
+        if format != "pcm16" {
+            bail!("unsupported input_audio_format: {format}");
+        }
+    }
+    if let Some(sample_rate) = session.sample_rate {
+        runtime.input_sample_rate = sample_rate;
+    }
+    if let Some(transcription) = session.input_audio_transcription {
+        runtime.language = transcription.language;
+        runtime.prompt = transcription.prompt;
+    }
+    if let Some(turn_detection) = session.turn_detection {
+        if turn_detection.kind != "server_vad" {
+            bail!("unsupported turn_detection type: {}", turn_detection.kind);
+        }
+        if let Some(silence_duration_ms) = turn_detection.silence_duration_ms {
+            runtime.vad.set_min_silence_ms(silence_duration_ms);
+        }
+    }
+    if let Some(word_timestamps) = session.word_timestamps {
+        runtime.word_timestamps = word_timestamps;
+    }
+
+    Ok(())
+}
+
+async fn process_audio_bytes<P>(
+    bytes: Vec<u8>,
+    runtime: &mut SessionRuntime<P>,
+    event_tx: &mpsc::Sender<ServerEvent>,
+    executor: &Arc<dyn AudioExecutor>,
+    queue: &InferenceQueue,
+    model: &ModelConfig,
+) -> Result<()>
+where
+    P: SpeechProb + Send + 'static,
+{
+    validate_input_buffer_len(&bytes, runtime)?;
+    let samples = pcm_s16le_to_f32(&bytes)?;
+    let samples_16k =
+        resample_to_16k_mono(&samples, runtime.input_sample_rate, runtime.input_channels)?;
+    let events = runtime.vad.push(&samples_16k);
+    handle_vad_events(events, runtime, event_tx, executor, queue, model).await
+}
+
+fn validate_input_buffer_len<P>(bytes: &[u8], runtime: &SessionRuntime<P>) -> Result<()> {
+    let max_bytes = u64::from(runtime.input_sample_rate)
+        .checked_mul(u64::from(runtime.input_channels))
+        .and_then(|samples| samples.checked_mul(2))
+        .and_then(|bytes_per_sec| bytes_per_sec.checked_mul(runtime.max_input_buffer_sec))
+        .and_then(|max_bytes| usize::try_from(max_bytes).ok())
+        .context("streaming input buffer limit overflow")?;
+
+    if bytes.len() > max_bytes {
+        bail!("streaming input buffer exceeded");
+    }
+    Ok(())
+}
+
+fn pcm_s16le_to_f32(bytes: &[u8]) -> Result<Vec<f32>> {
+    if !bytes.len().is_multiple_of(2) {
+        bail!("invalid audio: pcm16 byte length must be even");
+    }
+
+    Ok(bytes
+        .chunks_exact(2)
+        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32768.0)
+        .collect())
+}
+
+async fn handle_vad_events<P>(
+    events: Vec<VadEvent>,
+    runtime: &mut SessionRuntime<P>,
+    event_tx: &mpsc::Sender<ServerEvent>,
+    executor: &Arc<dyn AudioExecutor>,
+    queue: &InferenceQueue,
+    model: &ModelConfig,
+) -> Result<()>
+where
+    P: SpeechProb + Send + 'static,
+{
+    for event in events {
+        match event {
+            VadEvent::SpeechStart { at_ms } => {
+                let item_id = next_item_id(runtime);
+                runtime.current_item_id = Some(item_id.clone());
+                send_event(
+                    event_tx,
+                    ServerEvent::InputAudioBufferSpeechStarted {
+                        audio_start_ms: at_ms,
+                        item_id,
+                    },
+                )
+                .await?;
+            }
+            VadEvent::SpeechEnd {
+                end_ms, samples, ..
+            } => {
+                decode_segment(samples, end_ms, runtime, event_tx, executor, queue, model).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn flush_segment<P>(
+    runtime: &mut SessionRuntime<P>,
+    event_tx: &mpsc::Sender<ServerEvent>,
+    executor: &Arc<dyn AudioExecutor>,
+    queue: &InferenceQueue,
+    model: &ModelConfig,
+) -> Result<()>
+where
+    P: SpeechProb + Send + 'static,
+{
+    if let Some(event) = runtime.vad.flush() {
+        handle_vad_events(vec![event], runtime, event_tx, executor, queue, model).await?;
+    }
+    Ok(())
+}
+
+async fn decode_segment<P>(
+    samples: Vec<f32>,
+    audio_end_ms: u64,
+    runtime: &mut SessionRuntime<P>,
+    event_tx: &mpsc::Sender<ServerEvent>,
+    executor: &Arc<dyn AudioExecutor>,
+    queue: &InferenceQueue,
+    model: &ModelConfig,
+) -> Result<()>
+where
+    P: SpeechProb + Send + 'static,
+{
+    let item_id = runtime
+        .current_item_id
+        .take()
+        .unwrap_or_else(|| next_item_id(runtime));
+    send_event(
+        event_tx,
+        ServerEvent::InputAudioBufferSpeechStopped {
+            audio_end_ms,
+            item_id: item_id.clone(),
+        },
+    )
+    .await?;
+    send_event(
+        event_tx,
+        ServerEvent::InputAudioBufferCommitted {
+            item_id: item_id.clone(),
+        },
+    )
+    .await?;
+
+    let output = transcribe_segment(samples, runtime, executor, queue, model).await?;
+    let transcript = output.text;
+    if !transcript.trim().is_empty() {
+        runtime.confirmed_transcripts.push(transcript.clone());
+    }
+
+    send_event(
+        event_tx,
+        ServerEvent::InputAudioTranscriptionCompleted {
+            item_id,
+            transcript,
+            words: None,
+        },
+    )
+    .await
+}
+
+async fn transcribe_segment<P>(
+    samples: Vec<f32>,
+    runtime: &SessionRuntime<P>,
+    executor: &Arc<dyn AudioExecutor>,
+    queue: &InferenceQueue,
+    model: &ModelConfig,
+) -> Result<AudioOutput> {
+    let executor = Arc::clone(executor);
+    let model = model.clone();
+    let options = AudioInferenceOptions {
+        endpoint: AudioEndpoint::Transcriptions,
+        language: runtime.language.clone(),
+        prompt: conditioned_prompt(&runtime.prompt, &runtime.confirmed_transcripts),
+        temperature: None,
+        return_timestamps: runtime.word_timestamps,
+    };
+
+    let output = queue
+        .submit(InferenceJob::new(move || {
+            executor
+                .transcribe(&model, &samples, &options)
+                .map(InferenceOutput::Audio)
+        }))
+        .await?;
+
+    match output {
+        InferenceOutput::Audio(output) => Ok(output),
+        other => bail!("unexpected queue output for audio transcription: {other:?}"),
+    }
+}
+
+fn conditioned_prompt(
+    session_prompt: &Option<String>,
+    confirmed_transcripts: &[String],
+) -> Option<String> {
+    let history = confirmed_transcripts
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+    match (session_prompt.as_deref(), history.is_empty()) {
+        (Some(prompt), true) => Some(prompt.to_string()),
+        (Some(prompt), false) => Some(format!("{prompt}\n{history}")),
+        (None, false) => Some(history),
+        (None, true) => None,
+    }
+}
+
+fn next_item_id<P>(runtime: &mut SessionRuntime<P>) -> String {
+    let item_id = format!("item_{}", runtime.next_item_index);
+    runtime.next_item_index += 1;
+    item_id
+}
+
+async fn send_event(event_tx: &mpsc::Sender<ServerEvent>, event: ServerEvent) -> Result<()> {
+    event_tx
+        .send(event)
+        .await
+        .map_err(|_| anyhow::anyhow!("streaming event receiver closed"))
 }
