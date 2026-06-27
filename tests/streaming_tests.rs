@@ -393,6 +393,97 @@ async fn run_session_emits_ordered_finals() {
 }
 
 #[tokio::test]
+async fn run_session_emits_deltas_then_final() {
+    // speech(2) -> micro-pause(1) -> speech(2) -> endpoint(2).
+    let mut vad = VadSegmenter::with_probability_source(
+        ScriptedSpeechProb::new([0.9, 0.9, 0.2, 0.9, 0.9, 0.0, 0.0]),
+        64,
+        0.5,
+        30_000,
+    )
+    .unwrap();
+    vad.set_partial_silence_ms(32);
+    let cfg = SessionConfig {
+        session_id: 7,
+        input_sample_rate: 16_000,
+        input_channels: 1,
+        max_input_buffer_sec: 30,
+        language: None,
+        prompt: None,
+        word_timestamps: false,
+        vad: Box::new(vad),
+        cancel: Arc::new(AtomicBool::new(false)),
+    };
+    let executor = Arc::new(ScriptedAudioExecutor::new([
+        "Запиши",
+        "Запиши",
+        "Запиши сообщение",
+    ]));
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
+
+    let session = tokio::spawn(run_session(
+        cfg,
+        input_rx,
+        event_tx,
+        executor.clone(),
+        InferenceQueue::new(4),
+        whisper_model(),
+    ));
+
+    input_tx
+        .send(SessionInput::Audio(
+            general_purpose::STANDARD
+                .decode(pcm16_base64_for_windows(7))
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    drop(input_tx);
+    session.await.unwrap().unwrap();
+
+    let mut events = Vec::new();
+    while let Some(event) = event_rx.recv().await {
+        events.push(event);
+    }
+
+    let delta = events
+        .iter()
+        .find_map(|e| match e {
+            ServerEvent::InputAudioTranscriptionDelta {
+                item_id,
+                content_index,
+                delta,
+            } => Some((item_id.clone(), *content_index, delta.clone())),
+            _ => None,
+        })
+        .expect("expected a delta event");
+    assert_eq!(delta.0, "item_0");
+    assert_eq!(delta.1, 0);
+    assert_eq!(delta.2, "Запиши");
+
+    let final_pos = events
+        .iter()
+        .position(|e| matches!(e, ServerEvent::InputAudioTranscriptionCompleted { .. }))
+        .expect("expected a completed event");
+    let delta_pos = events
+        .iter()
+        .position(|e| matches!(e, ServerEvent::InputAudioTranscriptionDelta { .. }))
+        .unwrap();
+    assert!(
+        delta_pos < final_pos,
+        "delta must precede completed: {events:?}"
+    );
+
+    match &events[final_pos] {
+        ServerEvent::InputAudioTranscriptionCompleted { transcript, .. } => {
+            assert_eq!(transcript, "Запиши сообщение");
+        }
+        other => panic!("expected completed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn ws_roundtrip_streams_realtime_events_and_rejects_busy_session() {
     let executor = Arc::new(ScriptedAudioExecutor::new(["Запиши", "сообщение"]));
     let app = streaming_test_app(

@@ -236,6 +236,7 @@ struct SessionRuntime {
     current_item_id: Option<String>,
     next_item_index: u64,
     confirmed_transcripts: Vec<String>,
+    emitted_delta_text: String,
 }
 
 impl SessionRuntime {
@@ -269,6 +270,7 @@ pub async fn run_session(
         current_item_id: None,
         next_item_index: 0,
         confirmed_transcripts: Vec::new(),
+        emitted_delta_text: String::new(),
     };
 
     send_event(
@@ -459,6 +461,7 @@ async fn handle_vad_events(
             VadEvent::SpeechStart { at_ms } => {
                 let item_id = next_item_id(runtime);
                 runtime.current_item_id = Some(item_id.clone());
+                runtime.emitted_delta_text.clear();
                 send_event(
                     event_tx,
                     ServerEvent::InputAudioBufferSpeechStarted {
@@ -473,7 +476,9 @@ async fn handle_vad_events(
             } => {
                 decode_segment(samples, end_ms, runtime, event_tx, executor, queue, model).await?;
             }
-            VadEvent::SpeechPartial { .. } => {}
+            VadEvent::SpeechPartial { samples, .. } => {
+                emit_partial_delta(samples, runtime, event_tx, executor, queue, model).await?;
+            }
         }
     }
     Ok(())
@@ -559,6 +564,54 @@ async fn decode_segment(
         },
     )
     .await
+}
+
+async fn emit_partial_delta(
+    samples: Vec<f32>,
+    runtime: &mut SessionRuntime,
+    event_tx: &mpsc::Sender<ServerEvent>,
+    executor: &Arc<dyn AudioExecutor>,
+    queue: &InferenceQueue,
+    model: &ModelConfig,
+) -> Result<()> {
+    let options = AudioInferenceOptions {
+        endpoint: AudioEndpoint::Transcriptions,
+        language: runtime.language.clone(),
+        prompt: conditioned_prompt(&runtime.prompt, &runtime.confirmed_transcripts),
+        temperature: None,
+        return_timestamps: false,
+    };
+    let output = match transcribe_segment(samples, options, executor, queue, model).await {
+        Ok(output) => output,
+        Err(error) => {
+            tracing::warn!(%error, "partial transcription decode failed; skipping delta");
+            return Ok(());
+        }
+    };
+
+    let new_full = output.text;
+    let Some(delta) = new_full.strip_prefix(&runtime.emitted_delta_text) else {
+        return Ok(());
+    };
+    if delta.is_empty() {
+        return Ok(());
+    }
+
+    let Some(item_id) = runtime.current_item_id.clone() else {
+        return Ok(());
+    };
+
+    send_event(
+        event_tx,
+        ServerEvent::InputAudioTranscriptionDelta {
+            item_id,
+            content_index: 0,
+            delta: delta.to_string(),
+        },
+    )
+    .await?;
+    runtime.emitted_delta_text = new_full;
+    Ok(())
 }
 
 async fn transcribe_segment(
