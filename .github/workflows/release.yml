@@ -185,14 +185,17 @@ jobs:
           @"
           ai2npu $version
 
-          Локальная Windows-служба с OpenAI-compatible API для Whisper transcription и BGE-M3 embeddings через OpenVINO на Intel NPU.
+          Локальная Windows-служба с OpenAI-compatible API для streaming ASR, Whisper transcription/translation и BGE-M3 embeddings через OpenVINO на Intel NPU.
 
           Основное:
           - Windows service installer на Inno Setup.
-          - OpenAI-compatible endpoints: /v1/audio/transcriptions, /v1/audio/translations, /v1/embeddings, /v1/models, /health, /logs.
+          - OpenAI-compatible endpoints: /v1/realtime, /v1/audio/transcriptions, /v1/audio/translations, /v1/embeddings, /v1/models, /health, /logs.
+          - /v1/realtime: WebSocket streaming ASR, server-side VAD, speech_started/stopped, append-only transcription.delta и final transcription.completed.
+          - content_index: 0 в Realtime transcription delta/completed events.
+          - streaming.partial_silence_ms управляет VAD micro-pause partials.
           - Форматы ответа audio: json, verbose_json, text, srt, vtt.
           - Поддержка параметра temperature (0.0–1.0) для Whisper.
-          - Whisper: OpenVINO whisper-large-v3-turbo-int8-ov.
+          - Whisper: OpenVINO whisper-large-v3-turbo-int8-ov, preload=true и queue_timeout_sec=0 в дефолтном конфиге.
           - Embeddings: strokinkv/bge-m3-int8-ov.
           - Модели скачиваются установщиком через ai2npu install-model.
           - Пустое и слишком короткое audio возвращает пустой text без вызова Whisper.
