@@ -24,6 +24,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 rubato = "0.16"
+voice_activity_detector = { version = "0.2.1", features = ["load-dynamic"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"

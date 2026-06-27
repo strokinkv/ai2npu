@@ -16,4 +16,5 @@ pub mod openvino_backend;
 pub mod openvino_c;
 pub mod queue;
 pub mod resample;
+pub mod vad;
 pub mod windows_service;

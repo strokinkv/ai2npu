@@ -20,11 +20,7 @@ use ai2npu::config::{ModelConfig, ModelType};
 use ai2npu::inference::{AudioExecutor, AudioInferenceOptions, NativeWhisperExecutor};
 
 const DEFAULT_MODEL_DIR: &str = "models/OpenVINO/whisper-large-v3-turbo-int8-ov";
-const DEFAULT_WAVS: &[&str] = &[
-    "phrase_2s.wav",
-    "phrase_5s.wav",
-    "phrase_10s.wav",
-];
+const DEFAULT_WAVS: &[&str] = &["phrase_2s.wav", "phrase_5s.wav", "phrase_10s.wav"];
 
 fn model_config(model_dir: &Path) -> ModelConfig {
     ModelConfig {
@@ -84,7 +80,10 @@ fn main() -> anyhow::Result<()> {
     };
     let started = Instant::now();
     executor.transcribe(&model, &warmup, &options)?;
-    println!("Warm-up decode took {:.2}s\n", started.elapsed().as_secs_f64());
+    println!(
+        "Warm-up decode took {:.2}s\n",
+        started.elapsed().as_secs_f64()
+    );
 
     println!(
         "{:<16} {:>10} {:>12} {:>8}   transcript",
