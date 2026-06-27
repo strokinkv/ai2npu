@@ -29,6 +29,7 @@ vad_model_path = "models/silero_vad.onnx"
 default_min_silence_ms = 400
 default_max_segment_ms = 30000
 max_input_buffer_sec = 30
+partial_silence_ms = 250
 ```
 
 ## Одна сессия одновременно
@@ -108,12 +109,29 @@ NPU — однопользовательский ресурс, поэтому а
 - `input_audio_buffer.speech_stopped` `{ "audio_end_ms", "item_id" }` — конец
   фразы.
 - `input_audio_buffer.committed` `{ "item_id" }` — буфер фразы отправлен на декод.
+- `conversation.item.input_audio_transcription.delta`:
+
+  ```json
+  {
+    "type": "conversation.item.input_audio_transcription.delta",
+    "item_id": "item_0",
+    "content_index": 0,
+    "delta": "Запиши"
+  }
+  ```
+
+  Промежуточный результат фразы по микропаузе VAD. Семантика — **append-only**:
+  `delta` содержит только новый текст, который дописывается к ранее полученному
+  для того же `item_id`. Авторитетный текст приходит в `...completed`. Партиалы
+  включаются `streaming.partial_silence_ms > 0`; `0` выключает их. Каждый
+  партиал — полный прогон Whisper на NPU.
 - `conversation.item.input_audio_transcription.completed`:
 
   ```json
   {
     "type": "conversation.item.input_audio_transcription.completed",
     "item_id": "item_0",
+    "content_index": 0,
     "transcript": "Запиши сообщение",
     "words": [ { "text": "Запиши", "start_ms": 0, "end_ms": 500 } ]
   }
@@ -123,37 +141,10 @@ NPU — однопользовательский ресурс, поэтому а
   включённом `word_timestamps` (расширение ai2npu, не часть стандарта OpenAI).
 - `error` `{ "error": { "code", "message" } }`.
 
-Гарантии: события `...completed` упорядочены по фразам (`item_id`), не теряются и
-не дублируются; `speech_started`/`speech_stopped` обрамляют каждую фразу. Одна
-VAD-фраза = один Realtime-«item».
-
-## Партиалы (`delta`) — Phase 2, в реализации
-
-> Контракт зафиксирован (взят из OpenAI Realtime); реализация ведётся в ветке
-> `phase2-streaming-delta` по плану
-> `docs/superpowers/plans/2026-06-27-streaming-delta-partials.md`. До мерджа в
-> `main` сервер партиалы **не** эмитит.
-
-`conversation.item.input_audio_transcription.delta` — промежуточный результат
-фразы по микропаузе VAD:
-
-```json
-{
-  "type": "conversation.item.input_audio_transcription.delta",
-  "item_id": "item_0",
-  "content_index": 0,
-  "delta": "Запиши"
-}
-```
-
-- Семантика **append-only**: `delta` содержит только новый текст, дописываемый к
-  ранее полученному для того же `item_id`. Авторитетный текст — в `...completed`.
-- Включается `streaming.partial_silence_ms > 0` (порог микропаузы, `< min_silence_ms`);
-  `0` (по умолчанию) — партиалы выключены.
-- Каждый партиал — полный прогон Whisper на NPU (нет инкрементального декодинга
-  на статическом пайплайне); очередь сериализует, порядок `delta` перед
-  `completed` сохранён.
-- В Phase 2 в `...completed` добавляется поле `content_index: 0` (паритет с OpenAI).
+Гарантии: события `delta` для фразы, если они включены, идут перед её
+`...completed`; события `...completed` упорядочены по фразам (`item_id`), не
+теряются и не дублируются; `speech_started`/`speech_stopped` обрамляют каждую
+фразу. Одна VAD-фраза = один Realtime-«item».
 
 ## Коды ошибок
 

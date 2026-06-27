@@ -989,6 +989,7 @@ async fn live_npu_streaming_transcription_smoke() {
 
     // Collect events until the first completed lands (NPU cold start can be slow).
     let mut transcripts: Vec<(u64, String)> = Vec::new();
+    let mut delta_count = 0usize;
     let mut last_speech_stopped = std::time::Instant::now();
     let mut latency: Option<Duration> = None;
     let deadline = std::time::Instant::now() + Duration::from_secs(300);
@@ -1048,6 +1049,14 @@ async fn live_npu_streaming_transcription_smoke() {
                 eprintln!("completed {item_id}: {transcript:?}");
                 transcripts.push((n, transcript));
             }
+            Some("conversation.item.input_audio_transcription.delta") => {
+                delta_count += 1;
+                eprintln!(
+                    "delta {}: {:?}",
+                    event["item_id"].as_str().unwrap_or(""),
+                    event["delta"].as_str().unwrap_or("")
+                );
+            }
             Some("error") => {
                 eprintln!("server error event: {event}");
                 break;
@@ -1076,8 +1085,9 @@ async fn live_npu_streaming_transcription_smoke() {
 
     if failures.is_empty() {
         eprintln!(
-            "live NPU streaming smoke OK: {} phrase(s), first-phrase latency {:?}",
+            "live NPU streaming smoke OK: {} phrase(s), {} delta(s), first-phrase latency {:?}",
             transcripts.len(),
+            delta_count,
             latency
         );
     } else {
