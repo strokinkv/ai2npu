@@ -12,6 +12,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -242,31 +243,45 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: AppState) {
             cancel: Arc::clone(&cancel),
         },
         input_rx,
-        event_tx,
+        event_tx.clone(),
         Arc::clone(&state.audio_executor),
         state.queue.clone(),
         model,
     ));
 
-    loop {
-        tokio::select! {
-            event = event_rx.recv() => {
-                let Some(event) = event else {
-                    break;
-                };
-                if send_ws_event(&mut socket, event).await.is_err() {
-                    break;
-                }
-            }
-            message = socket.recv() => {
-                let Some(Ok(message)) = message else {
-                    break;
-                };
-                if !handle_ws_message(message, &input_tx, &mut socket).await {
-                    break;
-                }
+    // Split the socket so reads and writes run as independent loops. A single
+    // `select!` arm that both reads the socket (forwarding to `input_tx`) and
+    // drains `event_rx` head-of-line-blocks itself: while a slow NPU decode
+    // keeps `run_session` from draining `input_rx`, a fast client fills
+    // `input_tx`, the read arm parks inside `input_tx.send().await`, the event
+    // arm never runs, and `run_session` then blocks on `event_tx.send()` — a
+    // deadlock that tears down the socket mid-phrase. Separate tasks let either
+    // channel back-pressure without stalling the other.
+    let (mut sink, mut stream) = socket.split();
+    let read_event_tx = event_tx.clone();
+
+    let writer = async {
+        while let Some(event) = event_rx.recv().await {
+            let text = serde_json::to_string(&event).expect("server event should serialize");
+            if sink.send(Message::Text(text)).await.is_err() {
+                break;
             }
         }
+    };
+    let reader = async {
+        while let Some(message) = stream.next().await {
+            let Ok(message) = message else {
+                break;
+            };
+            if !handle_ws_message(message, &input_tx, &read_event_tx).await {
+                break;
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = reader => {}
+        _ = writer => {}
     }
 
     // Cooperative cancel: stop the orchestrator from decoding further buffered
@@ -274,6 +289,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: AppState) {
     // release the single-session guard (Task 1.7 / spec §9).
     cancel.store(true, Ordering::SeqCst);
     drop(input_tx);
+    drop(event_tx);
     let _ = session.await;
     drop(guard);
 }
@@ -281,7 +297,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: AppState) {
 async fn handle_ws_message(
     message: Message,
     input_tx: &tokio::sync::mpsc::Sender<SessionInput>,
-    socket: &mut WebSocket,
+    event_tx: &tokio::sync::mpsc::Sender<ServerEvent>,
 ) -> bool {
     match message {
         Message::Text(text) => match serde_json::from_str::<ClientEvent>(&text) {
@@ -289,27 +305,22 @@ async fn handle_ws_message(
                 .send(SessionInput::ClientEvent(event))
                 .await
                 .is_ok(),
-            Err(error) => {
-                let _ = send_ws_event(
-                    socket,
-                    streaming_error("invalid_request", format!("invalid client event: {error}")),
-                )
-                .await;
-                true
-            }
+            Err(error) => event_tx
+                .send(streaming_error(
+                    "invalid_request",
+                    format!("invalid client event: {error}"),
+                ))
+                .await
+                .is_ok(),
         },
         Message::Close(_) => false,
-        Message::Binary(_) => {
-            let _ = send_ws_event(
-                socket,
-                streaming_error(
-                    "invalid_request",
-                    "binary websocket frames are not supported",
-                ),
-            )
-            .await;
-            true
-        }
+        Message::Binary(_) => event_tx
+            .send(streaming_error(
+                "invalid_request",
+                "binary websocket frames are not supported",
+            ))
+            .await
+            .is_ok(),
         Message::Ping(_) | Message::Pong(_) => true,
     }
 }

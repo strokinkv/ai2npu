@@ -6,8 +6,10 @@ use std::time::Duration;
 
 use ai2npu::audio::{AudioOutput, AudioWord};
 use ai2npu::config::{AppConfig, ModelConfig, ModelType};
-use ai2npu::http::build_router_with_streaming_vad_factory;
-use ai2npu::inference::{AudioExecutor, AudioInferenceOptions, EmbeddingExecutor};
+use ai2npu::http::{build_router_with_executors, build_router_with_streaming_vad_factory};
+use ai2npu::inference::{
+    audio_executor_from_env, AudioExecutor, AudioInferenceOptions, EmbeddingExecutor,
+};
 use ai2npu::openvino_backend::OpenVinoStatus;
 use ai2npu::queue::InferenceQueue;
 use ai2npu::streaming::{
@@ -765,4 +767,235 @@ async fn run_session_omits_word_timestamps_by_default() {
         completed.is_none(),
         "words must be absent when word_timestamps is disabled"
     );
+}
+
+/// Minimal PCM16 mono WAV reader for the live smoke test: returns the sample
+/// rate and interleaved i16 samples (first channel only if multi-channel).
+fn read_wav_pcm16(path: &std::path::Path) -> (u32, Vec<i16>) {
+    let bytes = std::fs::read(path).expect("read smoke WAV");
+    assert_eq!(&bytes[0..4], b"RIFF", "not a RIFF file");
+    assert_eq!(&bytes[8..12], b"WAVE", "not a WAVE file");
+
+    let mut sample_rate = 0u32;
+    let mut channels = 1u16;
+    let mut data: Vec<i16> = Vec::new();
+    let mut pos = 12usize;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let size = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let body = pos + 8;
+        if id == b"fmt " {
+            channels = u16::from_le_bytes(bytes[body + 2..body + 4].try_into().unwrap());
+            sample_rate = u32::from_le_bytes(bytes[body + 4..body + 8].try_into().unwrap());
+            let bits = u16::from_le_bytes(bytes[body + 14..body + 16].try_into().unwrap());
+            assert_eq!(bits, 16, "smoke WAV must be 16-bit PCM");
+        } else if id == b"data" {
+            let end = (body + size).min(bytes.len());
+            let step = channels as usize;
+            let mut i = body;
+            while i + 2 <= end {
+                data.push(i16::from_le_bytes(bytes[i..i + 2].try_into().unwrap()));
+                i += 2 * step; // keep first channel only
+            }
+        }
+        pos = body + size + (size & 1); // chunks are word-aligned
+    }
+    assert!(sample_rate > 0 && !data.is_empty(), "empty/invalid WAV");
+    (sample_rate, data)
+}
+
+/// Task 1.10 (step 2): live NPU end-to-end streaming smoke. Streams a real WAV
+/// over the production WebSocket route (real Whisper NPU executor + real Silero
+/// VAD) and verifies ordered, non-empty `...completed` events. Gated behind
+/// `AI2NPU_RUN_NPU_TESTS=1` AND a `AI2NPU_SMOKE_WAV` path to a 16-bit PCM WAV.
+/// Requires the `ai2npuService` stopped (NPU is single-context) and the
+/// ort-compatible onnxruntime.dll on the search path (`ORT_DYLIB_PATH`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_npu_streaming_transcription_smoke() {
+    if std::env::var("AI2NPU_RUN_NPU_TESTS").ok().as_deref() != Some("1") {
+        eprintln!("skipping live NPU streaming smoke; set AI2NPU_RUN_NPU_TESTS=1");
+        return;
+    }
+    let Ok(wav_path) = std::env::var("AI2NPU_SMOKE_WAV") else {
+        eprintln!(
+            "skipping live NPU streaming smoke; set AI2NPU_SMOKE_WAV=<path to 16-bit PCM WAV>"
+        );
+        return;
+    };
+    let language = std::env::var("AI2NPU_SMOKE_LANG").unwrap_or_else(|_| "en".to_string());
+
+    let (sample_rate, samples) = read_wav_pcm16(std::path::Path::new(&wav_path));
+    eprintln!(
+        "smoke WAV: {} samples @ {} Hz ({:.2}s)",
+        samples.len(),
+        sample_rate,
+        samples.len() as f64 / sample_rate as f64
+    );
+
+    let app = build_router_with_executors(
+        example_config(),
+        OpenVinoStatus::detect(),
+        Arc::new(NoopEmbeddingExecutor),
+        audio_executor_from_env().expect("native whisper executor"),
+    );
+    let (url, server) = spawn_test_server(app).await;
+    let (mut socket, _) = connect_async(&url).await.unwrap();
+
+    // created
+    let created = next_ws_json(&mut socket).await;
+    assert_eq!(created["type"], "transcription_session.created");
+
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "transcription_session.update",
+                "session": {
+                    "input_audio_format": "pcm16",
+                    "input_audio_transcription": {
+                        "model": "openai/whisper-large-v3-turbo",
+                        "language": language,
+                    },
+                    "turn_detection": { "type": "server_vad", "threshold": 0.5 },
+                    "sample_rate": sample_rate,
+                    "word_timestamps": false,
+                }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    // Stream ~40ms PCM16 chunks to mimic a real microphone cadence.
+    let chunk_samples = (sample_rate as usize / 25).max(1);
+    for chunk in samples.chunks(chunk_samples) {
+        let mut pcm = Vec::with_capacity(chunk.len() * 2);
+        for s in chunk {
+            pcm.extend_from_slice(&s.to_le_bytes());
+        }
+        socket
+            .send(Message::Text(
+                json!({
+                    "type": "input_audio_buffer.append",
+                    "audio": general_purpose::STANDARD.encode(&pcm),
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+    }
+    // Force-close the trailing phrase so we don't depend on socket-close flush.
+    socket
+        .send(Message::Text(
+            json!({ "type": "input_audio_buffer.commit" }).to_string(),
+        ))
+        .await
+        .unwrap();
+
+    // Collect events until the first completed lands (NPU cold start can be slow).
+    let mut transcripts: Vec<(u64, String)> = Vec::new();
+    let mut last_speech_stopped = std::time::Instant::now();
+    let mut latency: Option<Duration> = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(300);
+    while std::time::Instant::now() < deadline {
+        // Wait long for the first final (NPU cold start compiles the Whisper
+        // model on first decode); once we have one, a short read timeout means
+        // the stream has drained.
+        let read_timeout = if transcripts.is_empty() {
+            Duration::from_secs(180)
+        } else {
+            // Allow a trailing phrase still decoding on the NPU to drain so the
+            // ordering assertion sees more than one item. Overridable via
+            // AI2NPU_SMOKE_DRAIN_SECS for slow tail segments.
+            let secs = std::env::var("AI2NPU_SMOKE_DRAIN_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(15);
+            Duration::from_secs(secs)
+        };
+        let next = tokio::time::timeout(read_timeout, socket.next()).await;
+        let frame = match next {
+            Ok(Some(Ok(Message::Text(text)))) => text,
+            Ok(Some(Ok(other))) => {
+                eprintln!("non-text frame: {other:?}");
+                continue;
+            }
+            Ok(Some(Err(e))) => {
+                eprintln!("websocket error: {e}");
+                break;
+            }
+            Ok(None) => {
+                eprintln!("websocket closed by server");
+                break;
+            }
+            Err(_) => {
+                eprintln!("read timed out after {read_timeout:?}");
+                break;
+            }
+        };
+        let event: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        eprintln!("event: {}", event["type"].as_str().unwrap_or("?"));
+        match event["type"].as_str() {
+            Some("input_audio_buffer.speech_stopped") => {
+                last_speech_stopped = std::time::Instant::now();
+            }
+            Some("conversation.item.input_audio_transcription.completed") => {
+                if latency.is_none() {
+                    latency = Some(last_speech_stopped.elapsed());
+                }
+                let item_id = event["item_id"].as_str().unwrap_or("");
+                let n = item_id
+                    .rsplit('_')
+                    .next()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(transcripts.len() as u64);
+                let transcript = event["transcript"].as_str().unwrap_or("").to_string();
+                eprintln!("completed {item_id}: {transcript:?}");
+                transcripts.push((n, transcript));
+            }
+            Some("error") => {
+                eprintln!("server error event: {event}");
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    server.abort();
+
+    let ids: Vec<u64> = transcripts.iter().map(|(n, _)| *n).collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    let mut failures: Vec<String> = Vec::new();
+    if transcripts.is_empty() {
+        failures.push("expected at least one completed transcription event".into());
+    }
+    if !transcripts.iter().any(|(_, t)| !t.trim().is_empty()) {
+        failures.push(format!("all transcripts were empty: {transcripts:?}"));
+    }
+    if ids != sorted {
+        failures.push(format!(
+            "completed events must be ordered by item id: {ids:?}"
+        ));
+    }
+
+    if failures.is_empty() {
+        eprintln!(
+            "live NPU streaming smoke OK: {} phrase(s), first-phrase latency {:?}",
+            transcripts.len(),
+            latency
+        );
+    } else {
+        for failure in &failures {
+            eprintln!("live NPU streaming smoke FAILED: {failure}");
+        }
+    }
+
+    // Unloading the OpenVINO NPU runtime + ort deadlocks at process teardown
+    // (CPUStreamsExecutor destructors wait forever). Since the smoke has already
+    // produced its verdict, exit the process explicitly instead of returning
+    // through the hanging native destructors. This path only runs in the gated
+    // NPU mode; a normal `cargo test` returns early above and never reaches here.
+    use std::io::Write as _;
+    let _ = std::io::stderr().flush();
+    std::process::exit(if failures.is_empty() { 0 } else { 1 });
 }
