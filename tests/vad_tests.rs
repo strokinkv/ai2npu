@@ -133,19 +133,35 @@ fn emits_partial_on_micro_pause_before_endpoint() {
     .unwrap();
     segmenter.set_partial_silence_ms(32);
 
-    let events = segmenter.push(&samples_for_windows(7));
+    let start_events = segmenter.push(&samples_for_windows(2));
+    assert_eq!(start_events, vec![VadEvent::SpeechStart { at_ms: 0 }]);
 
-    // SpeechStart, SpeechPartial (after the 1-window micro-pause), SpeechEnd.
-    assert_eq!(events.len(), 3, "got {events:?}");
-    assert!(matches!(events[0], VadEvent::SpeechStart { .. }));
-    match &events[1] {
-        VadEvent::SpeechPartial { samples, .. } => {
+    let partial_events = segmenter.push(&samples_for_windows(1));
+    assert_eq!(partial_events.len(), 1, "got {partial_events:?}");
+    match &partial_events[0] {
+        VadEvent::SpeechPartial {
+            start_ms,
+            at_ms,
+            samples,
+        } => {
+            assert_eq!((*start_ms, *at_ms), (0, 96));
             // Snapshot holds the 2 speech windows seen so far.
             assert_eq!(samples.len(), 2 * WINDOW_SAMPLES);
         }
         other => panic!("expected SpeechPartial, got {other:?}"),
     }
-    match &events[2] {
+
+    let resumed_events = segmenter.push(&samples_for_windows(2));
+    assert!(resumed_events.is_empty(), "got {resumed_events:?}");
+
+    let end_events = segmenter.push(&samples_for_windows(2));
+    assert_eq!(end_events.len(), 2, "got {end_events:?}");
+    assert!(
+        matches!(end_events[0], VadEvent::SpeechPartial { .. }),
+        "expected final-pause SpeechPartial, got {:?}",
+        end_events[0]
+    );
+    match &end_events[1] {
         VadEvent::SpeechEnd { samples, .. } => {
             // Final holds all 4 speech windows; partial is a strict prefix.
             assert_eq!(samples.len(), 4 * WINDOW_SAMPLES);

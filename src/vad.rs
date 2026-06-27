@@ -156,7 +156,14 @@ impl<P: SpeechProb> VadSegmenter<P> {
         if is_speech {
             if !self.in_speech {
                 self.start_segment(events);
-            } else if self.partials_enabled()
+            }
+            self.silence_ms = 0;
+            self.partial_emitted_for_pause = false;
+            self.speech_samples.extend_from_slice(window);
+            self.last_speech_end_ms = self.current_ms + WINDOW_MS;
+        } else if self.in_speech {
+            self.silence_ms += WINDOW_MS;
+            if self.partials_enabled()
                 && !self.partial_emitted_for_pause
                 && self.silence_ms >= self.partial_silence_ms
                 && self.silence_ms < self.min_silence_ms
@@ -165,16 +172,10 @@ impl<P: SpeechProb> VadSegmenter<P> {
                 self.partial_emitted_for_pause = true;
                 events.push(VadEvent::SpeechPartial {
                     start_ms: self.speech_start_ms,
-                    at_ms: self.current_ms - self.silence_ms + self.partial_silence_ms,
+                    at_ms: self.current_ms + WINDOW_MS,
                     samples: self.speech_samples.clone(),
                 });
             }
-            self.silence_ms = 0;
-            self.partial_emitted_for_pause = false;
-            self.speech_samples.extend_from_slice(window);
-            self.last_speech_end_ms = self.current_ms + WINDOW_MS;
-        } else if self.in_speech {
-            self.silence_ms += WINDOW_MS;
             if self.silence_ms >= self.min_silence_ms {
                 if let Some(event) = self.finish_segment() {
                     events.push(event);
