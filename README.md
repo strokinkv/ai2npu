@@ -2,8 +2,9 @@
 
 `ai2npu` — локальная Windows-служба для OpenVINO-инференса на Intel NPU с OpenAI-совместимым HTTP API.
 
-Проект закрывает три основных сценария:
+Проект закрывает четыре основных сценария:
 
+- потоковая ASR-транскрибация через WebSocket `/v1/realtime`;
 - транскрибация и перевод аудио через Whisper;
 - получение эмбеддингов через BGE-M3;
 - локальные эндпоинты для проверки здоровья, списка моделей и логов.
@@ -66,7 +67,7 @@ $response.data[0].embedding.Count
 - `POST /v1/embeddings` — эмбеддинги BGE-M3.
 - `POST /v1/audio/transcriptions` — транскрибация Whisper (форматы ответа: `json`, `verbose_json`, `text`, `srt`, `vtt`).
 - `POST /v1/audio/translations` — перевод аудио в английский текст.
-- `GET /v1/realtime` — WebSocket потоковой транскрибации «на лету» (подмножество OpenAI Realtime). Одна сессия одновременно; см. [docs/streaming-api.md](docs/streaming-api.md).
+- `GET /v1/realtime` — WebSocket потоковой транскрибации «на лету» (подмножество OpenAI Realtime). Одна сессия одновременно; VAD выдаёт `speech_started/stopped`, финальные `completed` и, при включённом `streaming.partial_silence_ms`, append-only `delta`; см. [docs/streaming-api.md](docs/streaming-api.md).
 - `GET /v1/models` — список включённых моделей.
 - `GET /health` — статус службы, NPU/OpenVINO, загруженные модели и очередь.
 - `GET /logs?lines=N` — последние строки лог-файла (по умолчанию 200).

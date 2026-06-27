@@ -15,9 +15,11 @@ turn-taking, разбор грамматики команд, вставку по
 
 ## Что ai2npu должен предоставить
 - **ASR-стриминг** — WebSocket `/v1/realtime`, **OpenAI-Realtime-совместимый** (подмножество
-  транскрипции, D5): низкая задержка, VAD-сегментация, пофразные
+  транскрипции, D5): низкая задержка, VAD-сегментация, промежуточные append-only
+  `conversation.item.input_audio_transcription.delta` по микропаузам VAD, пофразные
   `conversation.item.input_audio_transcription.completed` + границы реплик
-  `speech_started/stopped`. Это основной вклад в Marvin и причина drop-in заменяемости
+  `speech_started/stopped`. И `delta`, и `completed` несут `content_index: 0`.
+  Это основной вклад в Marvin и причина drop-in заменяемости
   (ai2npu ↔ облако OpenAI ↔ Speaches).
 - Эмбеддинги BGE-M3 и существующие OpenAI-совместимые эндпоинты — как есть.
 - (Опционально, в будущем) TTS-на-NPU как альтернативный бэкенд, если CPU-TTS не хватит.
@@ -30,13 +32,16 @@ ai2npu — одна из реализаций абстракции `AsrProvider`
 ## Рабочие документы этого репо
 - Спека ASR-стриминга: `docs/superpowers/specs/2026-06-26-streaming-dictation-asr-design.md`
 - План реализации + стабилизация: `docs/superpowers/plans/2026-06-26-streaming-dictation-and-stabilization.md`
-- Баги и рекомендации: `TODO.md`
+- Текущий публичный контракт стриминга: `docs/streaming-api.md`
 
 ## Где общая картина
 `~/projects/marvin` — архитектура, контракты между слоями, дорожная карта, контекст
 оркестратора и агента. Ключевой контракт ASR, который потребляет оркестратор, описан в
 `marvin/docs/components/ai2npu.md` и детально — в спеке выше.
 
-## Первый шаг реализации
-Бенчмарк real-time factor turbo на целевом NPU (гейт): он может скорректировать размер
-окна, таймаут тишины и дефолт пословных таймстемпов. См. план, Task 1.0.
+## Текущий статус стриминга
+Реализована серверная VAD-сегментация с финальными `completed` и частичными
+append-only `delta`, которые включаются параметром `streaming.partial_silence_ms`.
+`completed.transcript` остаётся авторитетным текстом фразы; partial-декод не попадает
+в историю подтверждённых фраз. Пословные таймстампы в протоколе есть, но на NPU пока
+остаются follow-up из-за ограничений OpenVINO GenAI `WhisperPipeline`.

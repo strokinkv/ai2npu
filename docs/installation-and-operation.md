@@ -72,6 +72,14 @@ level = "info"
 directory = "C:\\ProgramData\\ai2npu\\logs"
 max_file_size_mb = 10
 max_files = 10
+
+[streaming]
+enabled = true
+vad_model_path = "models/silero_vad.onnx"
+default_min_silence_ms = 400
+default_max_segment_ms = 30000
+max_input_buffer_sec = 30
+partial_silence_ms = 250
 ```
 
 Каждая модель задаётся через `[[models]]`. Текущие пути моделей:
@@ -126,6 +134,7 @@ http://127.0.0.1:9555
 - `POST /v1/embeddings`
 - `POST /v1/audio/transcriptions`
 - `POST /v1/audio/translations`
+- `GET /v1/realtime` (WebSocket)
 - `POST /admin/models/unload`
 
 `POST /admin/models/unload` используется командой `ai2npu.exe unload`. Это локальная административная операция для освобождения ресурсов модели без остановки службы.
@@ -156,6 +165,13 @@ curl.exe http://127.0.0.1:9555/v1/audio/transcriptions `
 - `srt`
 - `verbose_json`
 - `vtt`
+
+Потоковая транскрибация доступна по WebSocket `ws://127.0.0.1:9555/v1/realtime`.
+Сервер принимает текстовые JSON-кадры с base64 PCM16, использует server-side VAD,
+отправляет `speech_started/stopped`, append-only `conversation.item.input_audio_transcription.delta`
+при микропаузах и финальный `conversation.item.input_audio_transcription.completed`.
+Одна streaming-сессия активна одновременно; подробный контракт описан в
+`docs/streaming-api.md`.
 
 ## Как это работает
 

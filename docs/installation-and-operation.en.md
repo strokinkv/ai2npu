@@ -72,6 +72,14 @@ level = "info"
 directory = "C:\\ProgramData\\ai2npu\\logs"
 max_file_size_mb = 10
 max_files = 10
+
+[streaming]
+enabled = true
+vad_model_path = "models/silero_vad.onnx"
+default_min_silence_ms = 400
+default_max_segment_ms = 30000
+max_input_buffer_sec = 30
+partial_silence_ms = 250
 ```
 
 Each model is configured with `[[models]]`. Current paths:
@@ -126,6 +134,7 @@ Endpoints:
 - `POST /v1/embeddings`
 - `POST /v1/audio/transcriptions`
 - `POST /v1/audio/translations`
+- `GET /v1/realtime` (WebSocket)
 - `POST /admin/models/unload`
 
 `POST /admin/models/unload` is used by `ai2npu.exe unload`. It is a local administrative operation for releasing model resources without stopping the service.
@@ -156,6 +165,14 @@ Supported audio `response_format` values:
 - `srt`
 - `verbose_json`
 - `vtt`
+
+Streaming transcription is available over WebSocket at
+`ws://127.0.0.1:9555/v1/realtime`. The server accepts text JSON frames with
+base64 PCM16, runs server-side VAD, emits `speech_started/stopped`, append-only
+`conversation.item.input_audio_transcription.delta` on VAD micro-pauses, and the
+authoritative `conversation.item.input_audio_transcription.completed` final. Only
+one streaming session can be active at a time; see `docs/streaming-api.md` for the
+full contract.
 
 ## How It Works
 
