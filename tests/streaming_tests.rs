@@ -357,6 +357,7 @@ async fn run_session_emits_ordered_finals() {
             },
             ServerEvent::InputAudioTranscriptionCompleted {
                 item_id: "item_0".to_string(),
+                content_index: 0,
                 transcript: "Запиши".to_string(),
                 words: None,
             },
@@ -373,6 +374,7 @@ async fn run_session_emits_ordered_finals() {
             },
             ServerEvent::InputAudioTranscriptionCompleted {
                 item_id: "item_1".to_string(),
+                content_index: 0,
                 transcript: "сообщение".to_string(),
                 words: None,
             },
@@ -475,6 +477,7 @@ async fn ws_roundtrip_streams_realtime_events_and_rejects_busy_session() {
             json!({
                 "type": "conversation.item.input_audio_transcription.completed",
                 "item_id": "item_0",
+                "content_index": 0,
                 "transcript": "Запиши"
             }),
             json!({
@@ -494,6 +497,7 @@ async fn ws_roundtrip_streams_realtime_events_and_rejects_busy_session() {
             json!({
                 "type": "conversation.item.input_audio_transcription.completed",
                 "item_id": "item_1",
+                "content_index": 0,
                 "transcript": "сообщение"
             }),
         ]

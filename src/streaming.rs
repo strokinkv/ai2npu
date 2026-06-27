@@ -127,10 +127,15 @@ pub enum ServerEvent {
     #[serde(rename = "input_audio_buffer.committed")]
     InputAudioBufferCommitted { item_id: String },
     #[serde(rename = "conversation.item.input_audio_transcription.delta")]
-    InputAudioTranscriptionDelta { item_id: String, delta: String },
+    InputAudioTranscriptionDelta {
+        item_id: String,
+        content_index: u64,
+        delta: String,
+    },
     #[serde(rename = "conversation.item.input_audio_transcription.completed")]
     InputAudioTranscriptionCompleted {
         item_id: String,
+        content_index: u64,
         transcript: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         words: Option<Vec<TranscriptionWord>>,
@@ -548,6 +553,7 @@ async fn decode_segment(
         event_tx,
         ServerEvent::InputAudioTranscriptionCompleted {
             item_id,
+            content_index: 0,
             transcript,
             words,
         },
