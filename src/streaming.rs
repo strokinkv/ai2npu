@@ -69,6 +69,10 @@ pub struct SessionConfig {
     pub prompt: Option<String>,
     pub word_timestamps: bool,
     pub vad: Box<dyn StreamingVad>,
+    /// Cooperative cancellation flag. Set by the transport (e.g. on socket
+    /// disconnect) to stop submitting further segments without killing the
+    /// in-flight decode. See Task 1.7 / spec §9.
+    pub cancel: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -223,9 +227,16 @@ struct SessionRuntime {
     prompt: Option<String>,
     word_timestamps: bool,
     vad: Box<dyn StreamingVad>,
+    cancel: Arc<AtomicBool>,
     current_item_id: Option<String>,
     next_item_index: u64,
     confirmed_transcripts: Vec<String>,
+}
+
+impl SessionRuntime {
+    fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
 }
 
 pub async fn run_session(
@@ -236,7 +247,9 @@ pub async fn run_session(
     queue: InferenceQueue,
     model: ModelConfig,
 ) -> Result<()> {
-    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel = Arc::clone(&cfg.cancel);
+    // Cancel the session if this future is dropped (e.g. task aborted) so a
+    // re-entrant decode loop cannot keep running.
     let _cancel_on_drop = SessionCancelOnDrop(Arc::clone(&cancel));
     let mut runtime = SessionRuntime {
         session_id: cfg.session_id,
@@ -247,6 +260,7 @@ pub async fn run_session(
         prompt: cfg.prompt,
         word_timestamps: cfg.word_timestamps,
         vad: cfg.vad,
+        cancel: Arc::clone(&cancel),
         current_item_id: None,
         next_item_index: 0,
         confirmed_transcripts: Vec::new(),
@@ -279,6 +293,10 @@ pub async fn run_session(
         }
     }
 
+    if runtime.is_cancelled() {
+        // Cooperative cancel: do not decode trailing speech after disconnect.
+        return Ok(());
+    }
     flush_segment(&mut runtime, &event_tx, &executor, &queue, &model).await
 }
 
@@ -428,6 +446,10 @@ async fn handle_vad_events(
     model: &ModelConfig,
 ) -> Result<()> {
     for event in events {
+        if runtime.is_cancelled() {
+            // Cooperative cancel: stop starting/decoding further segments.
+            break;
+        }
         match event {
             VadEvent::SpeechStart { at_ms } => {
                 let item_id = next_item_id(runtime);

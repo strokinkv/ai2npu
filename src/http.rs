@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -228,6 +228,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: AppState) {
 
     let (input_tx, input_rx) = tokio::sync::mpsc::channel(64);
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(64);
+    let cancel = Arc::new(AtomicBool::new(false));
     let session = tokio::spawn(run_session(
         SessionConfig {
             session_id,
@@ -238,6 +239,7 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: AppState) {
             prompt: None,
             word_timestamps: false,
             vad,
+            cancel: Arc::clone(&cancel),
         },
         input_rx,
         event_tx,
@@ -267,6 +269,10 @@ async fn handle_realtime_socket(mut socket: WebSocket, state: AppState) {
         }
     }
 
+    // Cooperative cancel: stop the orchestrator from decoding further buffered
+    // segments once the socket is gone, then drain the in-flight decode and
+    // release the single-session guard (Task 1.7 / spec §9).
+    cancel.store(true, Ordering::SeqCst);
     drop(input_tx);
     let _ = session.await;
     drop(guard);

@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -280,6 +281,7 @@ async fn run_session_emits_ordered_finals() {
         prompt: None,
         word_timestamps: false,
         vad: Box::new(vad),
+        cancel: Arc::new(AtomicBool::new(false)),
     };
     let executor = Arc::new(ScriptedAudioExecutor::new(["Запиши", "сообщение"]));
     let (input_tx, input_rx) = tokio::sync::mpsc::channel(8);
@@ -506,4 +508,117 @@ async fn ws_roundtrip_streams_realtime_events_and_rejects_busy_session() {
 
     let _ = socket.close(None).await;
     server.abort();
+}
+
+#[derive(Debug)]
+struct BlockingAudioExecutor {
+    calls: Arc<AtomicUsize>,
+    entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl AudioExecutor for BlockingAudioExecutor {
+    fn transcribe(
+        &self,
+        _model: &ModelConfig,
+        _samples: &[f32],
+        options: &AudioInferenceOptions,
+    ) -> Result<AudioOutput> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n == 0 {
+            if let Some(tx) = self.entered.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            // Block until the test releases the first (in-flight) decode.
+            let _ = self.release.lock().unwrap().recv();
+        }
+        Ok(AudioOutput {
+            text: format!("segment {n}"),
+            language: options.language.clone(),
+            duration: 0.0,
+            segments: Vec::new(),
+        })
+    }
+}
+
+/// Task 1.7: when the cancel flag is set while a decode is in-flight, the
+/// orchestrator must drain the current decode but NOT start the remaining
+/// buffered segments (cooperative cancellation, not kill).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_session_stops_decoding_after_cancel() {
+    // 8 windows -> two speech segments.
+    let vad = VadSegmenter::with_probability_source(
+        ScriptedSpeechProb::new([0.9, 0.9, 0.0, 0.0, 0.9, 0.9, 0.0, 0.0]),
+        64,
+        0.5,
+        30_000,
+    )
+    .unwrap();
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cfg = SessionConfig {
+        session_id: 7,
+        input_sample_rate: 16_000,
+        input_channels: 1,
+        max_input_buffer_sec: 30,
+        language: None,
+        prompt: None,
+        word_timestamps: false,
+        vad: Box::new(vad),
+        cancel: Arc::clone(&cancel),
+    };
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let executor = Arc::new(BlockingAudioExecutor {
+        calls: Arc::clone(&calls),
+        entered: Mutex::new(Some(entered_tx)),
+        release: Mutex::new(release_rx),
+    });
+
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
+
+    let session = tokio::spawn(run_session(
+        cfg,
+        input_rx,
+        event_tx,
+        executor.clone(),
+        InferenceQueue::new(4),
+        whisper_model(),
+    ));
+
+    input_tx
+        .send(SessionInput::ClientEvent(
+            ClientEvent::InputAudioBufferAppend {
+                audio: pcm16_base64_for_windows(8),
+            },
+        ))
+        .await
+        .unwrap();
+
+    // Wait until the first segment decode is in-flight (blocked).
+    tokio::task::spawn_blocking(move || entered_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Disconnect: signal cooperative cancel, then release the in-flight decode.
+    cancel.store(true, Ordering::SeqCst);
+    release_tx.send(()).unwrap();
+    drop(input_tx);
+
+    session.await.unwrap().unwrap();
+
+    // Only the first (already in-flight) segment was decoded; the second was skipped.
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let mut completed = 0;
+    while let Some(event) = event_rx.recv().await {
+        if matches!(event, ServerEvent::InputAudioTranscriptionCompleted { .. }) {
+            completed += 1;
+        }
+    }
+    assert_eq!(completed, 1, "second buffered segment must not be decoded");
 }
