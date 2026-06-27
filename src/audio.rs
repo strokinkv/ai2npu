@@ -55,6 +55,16 @@ pub struct AudioSegment {
     pub text: String,
 }
 
+/// A single word with its timestamps (seconds). Populated only when the
+/// executor produces word-level timestamps; field name `word` mirrors the
+/// OpenVINO GenAI Whisper result schema.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct AudioWord {
+    pub word: String,
+    pub start: f64,
+    pub end: f64,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct AudioOutput {
     pub text: String,
@@ -62,6 +72,8 @@ pub struct AudioOutput {
     pub duration: f64,
     #[serde(default)]
     pub segments: Vec<AudioSegment>,
+    #[serde(default)]
+    pub words: Vec<AudioWord>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

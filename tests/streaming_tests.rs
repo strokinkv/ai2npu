@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ai2npu::audio::AudioOutput;
+use ai2npu::audio::{AudioOutput, AudioWord};
 use ai2npu::config::{AppConfig, ModelConfig, ModelType};
 use ai2npu::http::build_router_with_streaming_vad_factory;
 use ai2npu::inference::{AudioExecutor, AudioInferenceOptions, EmbeddingExecutor};
@@ -162,6 +162,7 @@ impl AudioExecutor for ScriptedAudioExecutor {
             language: options.language.clone(),
             duration: 0.0,
             segments: Vec::new(),
+            words: Vec::new(),
         })
     }
 }
@@ -537,6 +538,7 @@ impl AudioExecutor for BlockingAudioExecutor {
             language: options.language.clone(),
             duration: 0.0,
             segments: Vec::new(),
+            words: Vec::new(),
         })
     }
 }
@@ -621,4 +623,146 @@ async fn run_session_stops_decoding_after_cancel() {
         }
     }
     assert_eq!(completed, 1, "second buffered segment must not be decoded");
+}
+
+#[derive(Debug)]
+struct WordAudioExecutor {
+    text: String,
+    words: Vec<AudioWord>,
+}
+
+impl AudioExecutor for WordAudioExecutor {
+    fn transcribe(
+        &self,
+        _model: &ModelConfig,
+        _samples: &[f32],
+        options: &AudioInferenceOptions,
+    ) -> Result<AudioOutput> {
+        Ok(AudioOutput {
+            text: self.text.clone(),
+            language: options.language.clone(),
+            duration: 0.0,
+            segments: Vec::new(),
+            words: self.words.clone(),
+        })
+    }
+}
+
+fn single_segment_session(word_timestamps: bool, cancel: Arc<AtomicBool>) -> SessionConfig {
+    let vad = VadSegmenter::with_probability_source(
+        ScriptedSpeechProb::new([0.9, 0.9, 0.0, 0.0]),
+        64,
+        0.5,
+        30_000,
+    )
+    .unwrap();
+    SessionConfig {
+        session_id: 9,
+        input_sample_rate: 16_000,
+        input_channels: 1,
+        max_input_buffer_sec: 30,
+        language: None,
+        prompt: None,
+        word_timestamps,
+        vad: Box::new(vad),
+        cancel,
+    }
+}
+
+async fn run_single_segment(
+    cfg: SessionConfig,
+    executor: Arc<WordAudioExecutor>,
+) -> Vec<ServerEvent> {
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel(8);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
+    let session = tokio::spawn(run_session(
+        cfg,
+        input_rx,
+        event_tx,
+        executor,
+        InferenceQueue::new(4),
+        whisper_model(),
+    ));
+    input_tx
+        .send(SessionInput::ClientEvent(
+            ClientEvent::InputAudioBufferAppend {
+                audio: pcm16_base64_for_windows(4),
+            },
+        ))
+        .await
+        .unwrap();
+    drop(input_tx);
+    session.await.unwrap().unwrap();
+
+    let mut events = Vec::new();
+    while let Some(event) = event_rx.recv().await {
+        events.push(event);
+    }
+    events
+}
+
+/// Task 1.8: with `word_timestamps` enabled and an executor that returns word
+/// spans, the `completed` event carries per-word timestamps (ms).
+#[tokio::test]
+async fn run_session_emits_word_timestamps_when_enabled() {
+    let executor = Arc::new(WordAudioExecutor {
+        text: "Привет мир".to_string(),
+        words: vec![
+            AudioWord {
+                word: "Привет".to_string(),
+                start: 0.0,
+                end: 0.5,
+            },
+            AudioWord {
+                word: "мир".to_string(),
+                start: 0.5,
+                end: 1.0,
+            },
+        ],
+    });
+    let cfg = single_segment_session(true, Arc::new(AtomicBool::new(false)));
+    let events = run_single_segment(cfg, executor).await;
+
+    let completed = events
+        .into_iter()
+        .find_map(|event| match event {
+            ServerEvent::InputAudioTranscriptionCompleted { words, .. } => Some(words),
+            _ => None,
+        })
+        .expect("missing completed event");
+    let words = completed.expect("words should be present when word_timestamps is enabled");
+    assert_eq!(words.len(), 2);
+    assert_eq!(words[0].text, "Привет");
+    assert_eq!(words[0].start_ms, 0);
+    assert_eq!(words[0].end_ms, 500);
+    assert_eq!(words[1].text, "мир");
+    assert_eq!(words[1].start_ms, 500);
+    assert_eq!(words[1].end_ms, 1000);
+}
+
+/// Task 1.8: word timestamps are omitted by default (drop-in OpenAI Realtime).
+#[tokio::test]
+async fn run_session_omits_word_timestamps_by_default() {
+    let executor = Arc::new(WordAudioExecutor {
+        text: "Привет".to_string(),
+        words: vec![AudioWord {
+            word: "Привет".to_string(),
+            start: 0.0,
+            end: 0.5,
+        }],
+    });
+    let cfg = single_segment_session(false, Arc::new(AtomicBool::new(false)));
+    let events = run_single_segment(cfg, executor).await;
+
+    let completed = events
+        .into_iter()
+        .find_map(|event| match event {
+            ServerEvent::InputAudioTranscriptionCompleted { words, .. } => Some(words),
+            _ => None,
+        })
+        .expect("missing completed event");
+    assert!(
+        completed.is_none(),
+        "words must be absent when word_timestamps is disabled"
+    );
 }

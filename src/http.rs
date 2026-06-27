@@ -430,6 +430,7 @@ async fn create_audio(
                 language: request.language.clone(),
                 duration: wav_info.duration_sec,
                 segments: Vec::new(),
+                words: Vec::new(),
             },
         ));
     }

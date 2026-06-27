@@ -523,6 +523,21 @@ async fn decode_segment(
         return_timestamps: runtime.word_timestamps,
     };
     let output = transcribe_segment(samples, options, executor, queue, model).await?;
+    let words = if runtime.word_timestamps && !output.words.is_empty() {
+        Some(
+            output
+                .words
+                .iter()
+                .map(|word| TranscriptionWord {
+                    text: word.word.clone(),
+                    start_ms: (word.start * 1000.0).round() as u64,
+                    end_ms: (word.end * 1000.0).round() as u64,
+                })
+                .collect(),
+        )
+    } else {
+        None
+    };
     let transcript = output.text;
     if !transcript.trim().is_empty() {
         runtime.confirmed_transcripts.push(transcript.clone());
@@ -533,7 +548,7 @@ async fn decode_segment(
         ServerEvent::InputAudioTranscriptionCompleted {
             item_id,
             transcript,
-            words: None,
+            words,
         },
     )
     .await

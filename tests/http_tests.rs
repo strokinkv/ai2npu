@@ -153,6 +153,7 @@ async fn get_json(path: &str) -> (StatusCode, Value) {
             language: None,
             duration: 0.0,
             segments: Vec::new(),
+            words: Vec::new(),
         })),
     );
     let response = app
@@ -179,6 +180,7 @@ async fn get_json_with_loaded_models(path: &str) -> (StatusCode, Value) {
                 language: None,
                 duration: 0.0,
                 segments: Vec::new(),
+                words: Vec::new(),
             },
             vec!["openai/whisper-large-v3-turbo".to_string()],
         )),
@@ -203,6 +205,7 @@ async fn post_embeddings_json(body: Value) -> (StatusCode, Value) {
             language: None,
             duration: 0.0,
             segments: Vec::new(),
+            words: Vec::new(),
         })),
     );
     let response = app
@@ -232,6 +235,7 @@ async fn post_embeddings_raw_with_config(config: AppConfig, body: Vec<u8>) -> (S
             language: None,
             duration: 0.0,
             segments: Vec::new(),
+            words: Vec::new(),
         })),
     );
     let response = app
@@ -311,6 +315,7 @@ async fn post_audio_multipart_raw(
             language: None,
             duration: 0.0,
             segments: Vec::new(),
+            words: Vec::new(),
         })),
     );
     let response = app
@@ -370,6 +375,7 @@ async fn post_audio_multipart_raw_with_config(
             language: None,
             duration: 0.0,
             segments: Vec::new(),
+            words: Vec::new(),
         })),
     );
     let response = app
@@ -407,6 +413,7 @@ async fn post_audio_raw_with_config(
             language: None,
             duration: 0.0,
             segments: Vec::new(),
+            words: Vec::new(),
         })),
     );
     let response = app
@@ -479,6 +486,7 @@ async fn admin_unload_waits_for_active_request_and_unloads_all_models() {
             language: None,
             duration: 0.0,
             segments: Vec::new(),
+            words: Vec::new(),
         },
         vec!["openai/whisper-large-v3-turbo".to_string()],
     ));
@@ -718,6 +726,7 @@ async fn audio_transcription_suppresses_silence_hallucination() {
             language: None,
             duration: 1.0,
             segments: Vec::new(),
+            words: Vec::new(),
         })),
     );
     let boundary = "ai2npu-test-boundary";
