@@ -89,7 +89,11 @@ path = "C:/ProgramData/ai2npu/models/strokinkv/bge-m3-int8-ov"
 path = "C:/ProgramData/ai2npu/models/OpenVINO/whisper-large-v3-turbo-int8-ov"
 ```
 
-Loaded model sessions stay alive after first use; run `ai2npu.exe unload` to release resources without stopping the service.
+In the default config, Whisper (`openai/whisper-large-v3-turbo`) uses
+`preload = true` and `queue_timeout_sec = 0`: the model is warmed at service
+startup, stays resident, and requests wait in the inference queue without a queue
+timeout. BGE loads lazily by default. Run `ai2npu.exe unload` to release resources
+without stopping the service.
 
 After editing the config, restart the service:
 
@@ -176,7 +180,7 @@ full contract.
 
 ## How It Works
 
-At startup the service reads `config.toml`, initializes file logging, detects OpenVINO devices, and starts the local HTTP server. Models are loaded lazily on first request. Inference is serialized through a shared FIFO queue so only one model request runs at a time.
+At startup the service reads `config.toml`, initializes file logging, detects OpenVINO devices, and starts the local HTTP server. Models with `preload = true` are loaded immediately; other models are loaded lazily on first request. Inference is serialized through a shared FIFO queue so only one model request runs at a time. With `queue_timeout_sec = 0`, waiting for inference to start in the queue has no timer.
 
 The `ai2npu.exe unload` command enqueues the unload operation in the same queue. It does not interrupt an active request; it runs after that request and clears all loaded executor/session caches.
 

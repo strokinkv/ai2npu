@@ -143,8 +143,8 @@ begin
     'type = "whisper"' + #13#10 +
     'path = ''' + ModelRoot + '\OpenVINO\whisper-large-v3-turbo-int8-ov''' + #13#10 +
     'enabled = true' + #13#10 +
-    'preload = false' + #13#10 +
-    'queue_timeout_sec = 600' + #13#10 +
+    'preload = true' + #13#10 +
+    'queue_timeout_sec = 0' + #13#10 +
     'max_audio_duration_sec = 1800' + #13#10;
   end;
 

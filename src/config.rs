@@ -178,10 +178,6 @@ fn validate_model(model: &ModelConfig) -> Result<()> {
     if model.path.as_os_str().is_empty() {
         bail!("models.path must not be empty");
     }
-    if model.queue_timeout_sec == 0 {
-        bail!("models.queue_timeout_sec must be greater than 0");
-    }
-
     match model.model_type {
         ModelType::Embedding => {
             if model.max_audio_duration_sec.is_some() {

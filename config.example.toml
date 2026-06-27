@@ -65,9 +65,10 @@ type = "whisper"
 path = "models/OpenVINO/whisper-large-v3-turbo-int8-ov"
 # Enable this model. Default: true
 enabled = true
-# Preload model on startup. Default: false
-preload = false
-# Per-model queue timeout in seconds. Default: 600
-queue_timeout_sec = 600
+# Preload ASR model on startup for Marvin. Default: true
+preload = true
+# Per-model queue timeout in seconds.
+# 0 means wait without timing out; useful for always-warm ASR.
+queue_timeout_sec = 0
 # Maximum accepted audio duration in seconds. Default: 1800
 max_audio_duration_sec = 1800

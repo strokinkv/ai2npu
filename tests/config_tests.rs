@@ -11,6 +11,21 @@ fn example_config_is_valid() {
 }
 
 #[test]
+fn example_config_preloads_whisper_without_queue_timeout() {
+    let text = std::fs::read_to_string("config.example.toml").unwrap();
+    let cfg: AppConfig = toml::from_str(&text).unwrap();
+
+    let whisper = cfg
+        .models
+        .iter()
+        .find(|model| model.id == "openai/whisper-large-v3-turbo")
+        .expect("example config must include Whisper");
+
+    assert!(whisper.preload);
+    assert_eq!(whisper.queue_timeout_sec, 0);
+}
+
+#[test]
 fn rejects_non_loopback_host() {
     let text = r#"
 [server]
@@ -253,6 +268,41 @@ max_input_buffer_sec = 30
     let cfg: AppConfig = toml::from_str(text).unwrap();
 
     assert_eq!(cfg.streaming.unwrap().partial_silence_ms, 0);
+}
+
+#[test]
+fn allows_zero_model_queue_timeout_as_unbounded_wait() {
+    let text = r#"
+[server]
+host = "127.0.0.1"
+port = 9555
+request_body_limit_mb = 100
+thread_count = 16
+
+[queue]
+max_pending_requests = 10
+default_timeout_sec = 600
+
+[logging]
+level = "info"
+directory = "logs"
+max_file_size_mb = 10
+max_files = 10
+
+[[models]]
+id = "openai/whisper-large-v3-turbo"
+type = "whisper"
+path = "models/OpenVINO/whisper-large-v3-turbo-int8-ov"
+enabled = true
+preload = true
+queue_timeout_sec = 0
+max_audio_duration_sec = 1800
+"#;
+    let cfg: AppConfig = toml::from_str(text).unwrap();
+
+    cfg.validate().unwrap();
+    assert_eq!(cfg.models[0].queue_timeout_sec, 0);
+    assert!(cfg.models[0].preload);
 }
 
 #[test]

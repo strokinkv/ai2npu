@@ -92,8 +92,8 @@ type = \"whisper\"\r\n",
         ));
         text.push_str(
             "enabled = true\r\n\
-preload = false\r\n\
-queue_timeout_sec = 600\r\n\
+preload = true\r\n\
+queue_timeout_sec = 0\r\n\
 max_audio_duration_sec = 1800\r\n",
         );
     }

@@ -73,6 +73,50 @@ async fn returns_queue_timeout_when_waiting_too_long() {
 }
 
 #[tokio::test]
+async fn zero_queue_timeout_waits_until_job_starts() {
+    let queue = InferenceQueue::new(2);
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+    let first_queue = queue.clone();
+    let first = tokio::spawn(async move {
+        first_queue
+            .submit(InferenceJob::new(move || {
+                release_rx.recv().unwrap();
+                Ok(InferenceOutput::Embeddings(vec![vec![1.0]]))
+            }))
+            .await
+    });
+    tokio::task::yield_now().await;
+
+    let second_queue = queue.clone();
+    let second = tokio::spawn(async move {
+        second_queue
+            .submit_with_timeout(
+                InferenceJob::new(|| Ok(InferenceOutput::Embeddings(vec![vec![2.0]]))),
+                Duration::ZERO,
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+
+    assert!(
+        !second.is_finished(),
+        "zero timeout must wait without returning QueueError::Timeout"
+    );
+
+    release_tx.send(()).unwrap();
+
+    assert_eq!(
+        first.await.unwrap().unwrap(),
+        InferenceOutput::Embeddings(vec![vec![1.0]])
+    );
+    assert_eq!(
+        second.await.unwrap().unwrap(),
+        InferenceOutput::Embeddings(vec![vec![2.0]])
+    );
+}
+
+#[tokio::test]
 async fn pending_len_counts_running_job() {
     let queue = InferenceQueue::new(4);
     let observed_queue = queue.clone();

@@ -105,7 +105,12 @@ impl InferenceQueue {
         job: InferenceJob,
         timeout: Duration,
     ) -> impl Future<Output = Result<InferenceOutput, QueueError>> {
-        self.submit_inner(job, Some(timeout))
+        let timeout = if timeout.is_zero() {
+            None
+        } else {
+            Some(timeout)
+        };
+        self.submit_inner(job, timeout)
     }
 
     fn submit_inner(
