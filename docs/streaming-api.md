@@ -12,7 +12,13 @@ Realtime** (раздел транскрипции), что позволяет з
 - В конфиге включена секция `[streaming]` (`enabled = true`).
 - Есть включённая Whisper-модель в `[[models]]` (`type = "whisper"`).
 - Доступны OpenVINO runtime и устройство NPU.
-- Указан путь к Silero VAD (`vad_model_path`).
+- Рядом с `ai2npu.exe` лежит совместимый `onnxruntime.dll` (1.22.x) — кладётся
+  автоматически сборкой дистрибутива (`prepare-dist.ps1`). Он используется
+  `ort` для запуска VAD и должен опережать `System32\onnxruntime.dll` в поиске
+  DLL (каталог exe ищется раньше System32).
+
+> Модель Silero V5 встроена в крейт `voice_activity_detector`, отдельный файл не
+> нужен. Поле `vad_model_path` сейчас не используется (зарезервировано).
 
 Пример конфигурации:
 

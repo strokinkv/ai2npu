@@ -5,6 +5,10 @@ param(
     [string]$DistDir = "dist\ai2npu",
     [string]$OpenVinoGenAiRoot = "tools\openvino_genai_2026.2.0.0_archive\openvino_genai_windows_2026.2.0.0_x86_64",
     [string]$BridgeDll = "build\ai2npu_genai_bridge_archive\Release\ai2npu_genai_bridge.dll",
+    # ONNX Runtime version required by the `ort` crate (streaming VAD). Must match
+    # ort 2.0.0-rc.10's expected ORT 1.22.x.
+    [string]$OnnxRuntimeVersion = "1.22.0",
+    [string]$OnnxRuntimeUrl = "",
     [switch]$SkipCargoBuild
 )
 
@@ -90,6 +94,30 @@ foreach ($dll in $runtimeDlls) {
 Get-ChildItem $tbbBin -Filter "*.dll" |
     Where-Object { $_.Name -notlike "*_debug.dll" } |
     Copy-Item -Destination $dist
+
+# ONNX Runtime for the streaming VAD (`ort` load-dynamic). Ship the ort-compatible
+# 1.22.x onnxruntime.dll next to ai2npu.exe so it wins the Windows DLL search over
+# an incompatible System32 onnxruntime.dll (Windows ML ships 1.17). Static linking
+# is not possible (esaxx-rs /MT vs prebuilt ORT /MD).
+$ortArchive = Join-Path $ProjectRoot "tools\onnxruntime-win-x64-$OnnxRuntimeVersion"
+$ortDll = Join-Path $ortArchive "lib\onnxruntime.dll"
+if (-not (Test-Path $ortDll)) {
+    $ortZip = Join-Path $ProjectRoot "tools\onnxruntime-win-x64-$OnnxRuntimeVersion.zip"
+    if (-not (Test-Path $ortZip)) {
+        $url = if ($OnnxRuntimeUrl) {
+            $OnnxRuntimeUrl
+        } else {
+            "https://github.com/microsoft/onnxruntime/releases/download/v$OnnxRuntimeVersion/onnxruntime-win-x64-$OnnxRuntimeVersion.zip"
+        }
+        Write-Host "Downloading ONNX Runtime $OnnxRuntimeVersion from $url"
+        Invoke-WebRequest -Uri $url -OutFile $ortZip
+    }
+    Expand-Archive -Path $ortZip -DestinationPath (Join-Path $ProjectRoot "tools") -Force
+}
+if (-not (Test-Path $ortDll)) {
+    throw "onnxruntime.dll not found after extraction: $ortDll"
+}
+Copy-Item $ortDll (Join-Path $dist "onnxruntime.dll")
 
 if ($RustToolchain -like "*windows-gnu") {
     $msysDlls = @(
